@@ -20,6 +20,13 @@ import {
   getApiToken,
   getLastModelId,
   getLastSessionId,
+  getSidebarVisible,
+  getSidebarWidth,
+  persistSidebarVisible,
+  persistSidebarWidth,
+  SIDEBAR_WIDTH_DEFAULT,
+  SIDEBAR_WIDTH_MAX,
+  SIDEBAR_WIDTH_MIN,
   interruptChat,
   listApiTokens,
   listArtifacts,
@@ -41,11 +48,13 @@ import {
   streamRun,
   uploadArtifact,
 } from "./api/client";
+import { MacoIcon, type MacoIconName } from "./components/Icons";
 import { McpSettings } from "./components/McpSettings";
 import { ModelSettings } from "./components/ModelSettings";
 import { SkillsPanel } from "./components/SkillsPanel";
 import { ToolPolicySettings } from "./components/ToolPolicySettings";
 import { useChatStore, type Message } from "./store/chat";
+import { applyTheme, getTheme, type Theme, toggleTheme as flipTheme } from "./theme";
 
 type SseEvent = {
   type: string;
@@ -92,6 +101,79 @@ export default function App() {
   const [models, setModels] = useState<ModelView[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("tasks");
+  const [theme, setTheme] = useState<Theme>(getTheme);
+  const [sidebarOpen, setSidebarOpen] = useState(getSidebarVisible);
+  const [sidebarWidth, setSidebarWidth] = useState(getSidebarWidth);
+  const sidebarWidthRef = useRef(sidebarWidth);
+
+  useEffect(() => {
+    sidebarWidthRef.current = sidebarWidth;
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  function onToggleTheme() {
+    setTheme((current) => flipTheme(current));
+  }
+
+  function clampSidebarWidth(width: number) {
+    const maxByViewport = Math.max(SIDEBAR_WIDTH_MIN, window.innerWidth - 320);
+    return Math.round(
+      Math.min(SIDEBAR_WIDTH_MAX, maxByViewport, Math.max(SIDEBAR_WIDTH_MIN, width)),
+    );
+  }
+
+  function onSidebarResizeStart(e: React.PointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidthRef.current;
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
+    document.body.classList.add("sidebar-resizing");
+
+    const onMove = (ev: PointerEvent) => {
+      const delta = startX - ev.clientX;
+      setSidebarWidth(clampSidebarWidth(startWidth + delta));
+    };
+
+    const onEnd = (ev: PointerEvent) => {
+      if (handle.hasPointerCapture(ev.pointerId)) {
+        handle.releasePointerCapture(ev.pointerId);
+      }
+      document.body.classList.remove("sidebar-resizing");
+      persistSidebarWidth(sidebarWidthRef.current);
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onEnd);
+      handle.removeEventListener("pointercancel", onEnd);
+    };
+
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onEnd);
+    handle.addEventListener("pointercancel", onEnd);
+  }
+
+  function resetSidebarWidth() {
+    setSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+    persistSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+  }
+
+  function openSidebar(tab?: SidebarTab) {
+    setSidebarOpen(true);
+    persistSidebarVisible(true);
+    if (tab) setSidebarTab(tab);
+  }
+
+  function closeSidebar() {
+    setSidebarOpen(false);
+    persistSidebarVisible(false);
+  }
+
+  function toggleSidebar() {
+    if (sidebarOpen) closeSidebar();
+    else openSidebar();
+  }
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [jobName, setJobName] = useState("");
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
@@ -289,7 +371,7 @@ export default function App() {
         role: "assistant",
         content: "请先在「设置」中配置模型（API Key + Base URL + Model ID）",
       });
-      setSidebarTab("settings");
+      openSidebar("settings");
       return;
     }
     setLoading(true);
@@ -396,18 +478,24 @@ export default function App() {
     }
   }
 
-  const tabs: { id: SidebarTab; label: string }[] = [
-    { id: "sessions", label: "会话" },
-    { id: "tasks", label: "任务" },
-    { id: "memory", label: "记忆" },
-    { id: "skills", label: "技能" },
-    { id: "usage", label: "用量" },
-    { id: "jobs", label: "任务调度" },
-    { id: "settings", label: "设置" },
+  const tabs: { id: SidebarTab; label: string; icon: MacoIconName; desc: string }[] = [
+    { id: "sessions", label: "会话", icon: "sessions", desc: "历史对话与切换" },
+    { id: "tasks", label: "任务", icon: "tasks", desc: "计划、待办与附件" },
+    { id: "memory", label: "记忆", icon: "memory", desc: "长期记忆读写" },
+    { id: "skills", label: "技能", icon: "skills", desc: "本地 Skill 文件" },
+    { id: "usage", label: "用量", icon: "usage", desc: "Token 与费用统计" },
+    { id: "jobs", label: "调度", icon: "jobs", desc: "定时后台任务" },
+    { id: "settings", label: "设置", icon: "settings", desc: "模型、MCP 与鉴权" },
   ];
 
+  const activeTab = tabs.find((t) => t.id === sidebarTab) ?? tabs[0];
+
+  const shellStyle = sidebarOpen
+    ? ({ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties)
+    : undefined;
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell${sidebarOpen ? "" : " sidebar-closed"}`} style={shellStyle}>
       <div className="app-main">
         <header className="app-topbar">
           <div className="app-logo">ma<span>co</span></div>
@@ -499,14 +587,31 @@ export default function App() {
               重连
             </button>
           )}
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={() => setSidebarTab("settings")}
-            style={{ marginLeft: "auto" }}
-          >
-            ⚙ 设置
-          </button>
+          <div className="topbar-actions">
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost btn-icon-only theme-toggle"
+              onClick={onToggleTheme}
+              title={theme === "dark" ? "切换浅色模式" : "切换深色模式"}
+              aria-label={theme === "dark" ? "切换浅色模式" : "切换深色模式"}
+            >
+              <MacoIcon name={theme === "dark" ? "sun" : "moon"} size={18} />
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost sidebar-toggle"
+              onClick={toggleSidebar}
+              aria-expanded={sidebarOpen}
+              title={sidebarOpen ? "收起右侧工具栏" : "展开右侧工具栏"}
+            >
+              <MacoIcon name={sidebarOpen ? "panel-left" : "panel-right"} size={16} />
+              {sidebarOpen ? "收起面板" : "工具面板"}
+            </button>
+            <button type="button" className="btn btn-sm" onClick={() => openSidebar("settings")}>
+              <MacoIcon name="settings" size={16} />
+              设置
+            </button>
+          </div>
         </header>
 
         <div className="chat-scroll">
@@ -518,7 +623,7 @@ export default function App() {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  onClick={() => setSidebarTab("settings")}
+                  onClick={() => openSidebar("settings")}
                 >
                   添加模型
                 </button>
@@ -612,12 +717,12 @@ export default function App() {
             />
             <button
               type="button"
-              className="btn btn-ghost btn-sm"
+              className="btn btn-ghost btn-sm btn-icon-only"
               title="上传附件"
               disabled={loading}
               onClick={() => fileInputRef.current?.click()}
             >
-              📎
+              <MacoIcon name="paperclip" size={18} />
             </button>
             <textarea
               className="chat-input"
@@ -640,42 +745,76 @@ export default function App() {
         </div>
       </div>
 
-      <aside className="app-sidebar">
-        <div className="sidebar-tabs">
+      {sidebarOpen && (
+        <div className="sidebar-column">
+          <div
+            className="sidebar-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调节侧栏宽度"
+            aria-valuenow={sidebarWidth}
+            aria-valuemin={SIDEBAR_WIDTH_MIN}
+            aria-valuemax={SIDEBAR_WIDTH_MAX}
+            title="拖拽调节宽度，双击恢复默认"
+            onPointerDown={onSidebarResizeStart}
+            onDoubleClick={resetSidebarWidth}
+          />
+          <aside className="app-sidebar">
+        <nav className="sidebar-nav" aria-label="侧栏导航">
           {tabs.map((t) => (
             <button
               key={t.id}
               type="button"
               className={`sidebar-tab ${sidebarTab === t.id ? "active" : ""}`}
-              onClick={() => setSidebarTab(t.id)}
+              onClick={() => openSidebar(t.id)}
+              title={t.desc}
             >
-              {t.label}
+              <span className="sidebar-tab-icon">
+                <MacoIcon name={t.icon} size={18} />
+              </span>
+              <span className="sidebar-tab-label">{t.label}</span>
             </button>
           ))}
-        </div>
+        </nav>
 
-        <div className="sidebar-panel">
+        <div className="sidebar-body">
+          <div className="sidebar-header">
+            <div className="sidebar-header-text">
+              <h2>{activeTab.label}</h2>
+              <p>{activeTab.desc}</p>
+            </div>
+            <button
+              type="button"
+              className="btn btn-ghost btn-icon sidebar-close"
+              onClick={closeSidebar}
+              title="收起工具栏"
+              aria-label="收起工具栏"
+            >
+              <MacoIcon name="x" size={16} />
+            </button>
+          </div>
+
+          <div className="sidebar-panel">
           {sidebarTab === "sessions" && (
             <div className="panel-section">
-              <h3>最近会话</h3>
               {sessions.length === 0 ? (
-                <p style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>暂无会话</p>
+                <p className="panel-empty">暂无会话，发送第一条消息即可创建。</p>
               ) : (
                 sessions.map((s) => (
-                  <div key={s.session_id} style={{ display: "flex", gap: 4, marginBottom: 6 }}>
+                  <div key={s.session_id} className="session-row">
                     <button
                       type="button"
-                      className={`panel-card ${sessionId === s.session_id ? "active" : ""}`}
-                      style={{ flex: 1, textAlign: "left", cursor: "pointer" }}
+                      className={`panel-card panel-card--clickable ${sessionId === s.session_id ? "active" : ""}`}
                       onClick={() => loadSession(s.session_id, s.model_id)}
                     >
-                      <strong>{s.title ?? s.session_id.slice(0, 8)}</strong>
+                      <span className="session-title">{s.title ?? s.session_id.slice(0, 8)}</span>
                       <div className="model-meta">{s.updated_at}</div>
                     </button>
                     <button
                       type="button"
-                      className="btn btn-sm btn-ghost"
+                      className="btn btn-sm btn-ghost session-delete"
                       title="删除会话"
+                      aria-label="删除会话"
                       onClick={async () => {
                         if (!confirm("确定删除该会话？")) return;
                         await deleteSession(s.session_id);
@@ -692,20 +831,21 @@ export default function App() {
                   </div>
                 ))
               )}
-              <button
-                type="button"
-                className="btn btn-sm btn-primary"
-                style={{ marginTop: 8 }}
-                onClick={() => {
-                  reset();
-                  setLastSessionId(null);
-                  setArtifacts([]);
-                  setPlan("");
-                  setTodos([]);
-                }}
-              >
-                新对话
-              </button>
+              <div className="panel-actions">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary btn-block"
+                  onClick={() => {
+                    reset();
+                    setLastSessionId(null);
+                    setArtifacts([]);
+                    setPlan("");
+                    setTodos([]);
+                  }}
+                >
+                  新对话
+                </button>
+              </div>
             </div>
           )}
 
@@ -747,7 +887,7 @@ export default function App() {
               <div className="panel-section">
                 <h3>待办</h3>
                 {todos.length === 0 ? (
-                  <p style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>—</p>
+                  <p className="panel-empty">暂无待办</p>
                 ) : (
                   todos.map((t) => (
                     <div key={t.task_key} className="todo-item">
@@ -803,12 +943,25 @@ export default function App() {
               >
                 保存
               </button>
-              <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+              <div className="input-row" style={{ marginTop: 12 }}>
                 <input
-                  style={{ flex: 1 }}
                   placeholder="搜索记忆"
                   value={memorySearchQ}
                   onChange={(e) => setMemorySearchQ(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && memorySearchQ.trim()) {
+                      e.preventDefault();
+                      searchMemory(memorySearchQ.trim()).then((r) =>
+                        setMemorySearchHits(
+                          r.results.map((m, i) => ({
+                            id: i,
+                            content: m.content,
+                            timestamp: r.search_mode,
+                          })),
+                        ),
+                      );
+                    }
+                  }}
                 />
                 <button
                   type="button"
@@ -829,8 +982,8 @@ export default function App() {
                 </button>
               </div>
               {memorySearchHits.length > 0 && (
-                <div style={{ marginTop: 10 }}>
-                  <h4 style={{ margin: "0 0 6px", fontSize: "0.85rem" }}>搜索结果</h4>
+                <div className="panel-section" style={{ marginTop: 16, marginBottom: 0 }}>
+                  <h3>搜索结果</h3>
                   {memorySearchHits.map((m) => (
                     <div key={m.id} className="memory-item">
                       <div className="memory-time">{m.timestamp}</div>
@@ -839,9 +992,8 @@ export default function App() {
                   ))}
                 </div>
               )}
-              <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+              <div className="input-row" style={{ marginTop: 12 }}>
                 <input
-                  style={{ flex: 1 }}
                   placeholder="按关键词删除"
                   value={memoryDeleteQ}
                   onChange={(e) => setMemoryDeleteQ(e.target.value)}
@@ -868,7 +1020,7 @@ export default function App() {
             <div className="panel-section">
               <h3>Token 用量</h3>
               {usage.length === 0 ? (
-                <p style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>暂无用量数据</p>
+                <p className="panel-empty">暂无用量数据</p>
               ) : (
                 usage.map((u) => (
                   <div key={u.key} className="stat-row">
@@ -891,25 +1043,25 @@ export default function App() {
                   <strong>{j.name}</strong>
                   <div className="model-meta">{j.job_type} · {j.status}</div>
                   {j.next_run_at && <div className="model-meta">下次: {j.next_run_at}</div>}
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    style={{ marginTop: 8 }}
-                    onClick={async () => setJobs(await fetchJobs())}
-                  >
-                    刷新
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-primary"
-                    style={{ marginTop: 8, marginLeft: 6 }}
-                    onClick={async () => {
-                      await runJobNow(j.id);
-                      setJobs(await fetchJobs());
-                    }}
-                  >
-                    立即执行
-                  </button>
+                  <div className="job-card-actions">
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={async () => setJobs(await fetchJobs())}
+                    >
+                      刷新
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-primary"
+                      onClick={async () => {
+                        await runJobNow(j.id);
+                        setJobs(await fetchJobs());
+                      }}
+                    >
+                      立即执行
+                    </button>
+                  </div>
                 </div>
               ))}
               <div className="field">
@@ -942,6 +1094,30 @@ export default function App() {
 
           {sidebarTab === "settings" && (
             <>
+              <div className="panel-section">
+                <h3>外观</h3>
+                <p className="panel-empty" style={{ paddingTop: 0 }}>
+                  切换界面配色，偏好会保存在本地。
+                </p>
+                <div className="theme-segment">
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${theme === "light" ? "btn-primary" : ""}`}
+                    onClick={() => setTheme("light")}
+                  >
+                    <MacoIcon name="sun" size={16} />
+                    浅色
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${theme === "dark" ? "btn-primary" : ""}`}
+                    onClick={() => setTheme("dark")}
+                  >
+                    <MacoIcon name="moon" size={16} />
+                    深色
+                  </button>
+                </div>
+              </div>
               <ModelSettings
                 models={models}
                 onChange={(list) => {
@@ -1014,8 +1190,11 @@ export default function App() {
               </div>
             </>
           )}
+          </div>
         </div>
-      </aside>
+          </aside>
+        </div>
+      )}
     </div>
   );
 }

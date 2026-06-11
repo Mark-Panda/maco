@@ -2,6 +2,34 @@ const API = "/api";
 const TOKEN_KEY = "maco_api_token";
 const LAST_SESSION_KEY = "maco_last_session";
 const LAST_MODEL_KEY = "maco_last_model";
+const SIDEBAR_VISIBLE_KEY = "maco_sidebar_visible";
+const SIDEBAR_WIDTH_KEY = "maco_sidebar_width";
+
+export const SIDEBAR_WIDTH_MIN = 360;
+export const SIDEBAR_WIDTH_DEFAULT = 480;
+export const SIDEBAR_WIDTH_MAX = 720;
+
+export function getSidebarVisible(): boolean {
+  const raw = localStorage.getItem(SIDEBAR_VISIBLE_KEY);
+  return raw === null ? true : raw === "1";
+}
+
+export function persistSidebarVisible(visible: boolean): void {
+  localStorage.setItem(SIDEBAR_VISIBLE_KEY, visible ? "1" : "0");
+}
+
+export function getSidebarWidth(): number {
+  const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+  if (!raw) return SIDEBAR_WIDTH_DEFAULT;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n)) return SIDEBAR_WIDTH_DEFAULT;
+  return Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, n));
+}
+
+export function persistSidebarWidth(width: number): void {
+  const clamped = Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, Math.round(width)));
+  localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clamped));
+}
 
 export function getLastSessionId(): string | null {
   return localStorage.getItem(LAST_SESSION_KEY);
