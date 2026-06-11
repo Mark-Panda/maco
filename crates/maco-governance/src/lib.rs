@@ -6,7 +6,9 @@ pub mod guardrail;
 pub mod hitl;
 pub mod usage;
 
-pub use artifact::{allowed_mime, validate_artifact, MAX_ARTIFACT_BYTES};
+pub use artifact::{
+    allowed_mime, is_previewable_mime, mime_for_artifact, validate_artifact, MAX_ARTIFACT_BYTES,
+};
 pub use auth::{
     auth_disabled, generate_token, hash_token, has_scope, parse_scopes, required_scope_for_path,
     scopes_json, SCOPE_ADMIN, SCOPE_CHAT, SCOPE_EXPORT, SCOPE_MEMORY,

@@ -9,8 +9,10 @@ if [[ ! -f .env ]]; then
 fi
 
 SKILLS_DIR="${HOME}/.maco/skills"
-mkdir -p "$SKILLS_DIR"
+TMP_DIR="${HOME}/.maco/tmp/sessions"
+mkdir -p "$SKILLS_DIR" "$TMP_DIR"
 echo "Skills directory: $SKILLS_DIR"
+echo "Agent temp workspace root: ${HOME}/.maco/tmp"
 
 cargo run -p maco-server -- init
 

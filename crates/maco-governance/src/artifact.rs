@@ -11,7 +11,39 @@ const ALLOWED_MIMES: &[&str] = &[
     "application/pdf",
     "text/plain",
     "text/markdown",
+    "text/html",
+    "text/css",
+    "text/csv",
+    "application/json",
+    "application/javascript",
+    "application/xml",
+    "text/x-python",
+    "text/x-rust",
+    "text/x-sh",
 ];
+
+/// 根据文件名与内容推断可入库的 MIME（未知文本回落为 `text/plain`）。
+pub fn mime_for_artifact(filename: &str, bytes: &[u8]) -> String {
+    let guessed = mime_guess::from_path(filename)
+        .first_or_octet_stream()
+        .to_string();
+    if allowed_mime(&guessed) {
+        return guessed;
+    }
+    if std::str::from_utf8(bytes).is_ok() {
+        return "text/plain".to_string();
+    }
+    guessed
+}
+
+/// 是否可在 UI 内联预览（文本或常见图片）。
+pub fn is_previewable_mime(mime: &str) -> bool {
+    mime.starts_with("text/")
+        || mime == "application/json"
+        || mime == "application/javascript"
+        || mime == "application/xml"
+        || mime.starts_with("image/")
+}
 
 pub fn allowed_mime(mime: &str) -> bool {
     ALLOWED_MIMES.contains(&mime)

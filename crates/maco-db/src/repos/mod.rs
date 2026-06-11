@@ -17,7 +17,9 @@ pub use artifact::{ArtifactRecord, ArtifactRepo};
 pub use callback_log::CallbackLogRepo;
 pub use elicitation::{payload_summary, ElicitationRecord, ElicitationRepo};
 pub use job::{JobRecord, JobRepo};
-pub use mcp_server::{McpServerRecord, McpServerRepo};
+pub use mcp_server::{
+    rebuild_filesystem_mcp_roots, seed_default_filesystem_mcp, McpServerRecord, McpServerRepo,
+};
 pub use model::{ModelRecord, ModelRepo};
 pub use react::{PlanRecord, ReactRepo, TodoRecord};
 pub use run::{RunRecord, RunRepo};

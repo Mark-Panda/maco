@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use adk_core::identity::{SessionId, UserId};
@@ -5,18 +6,25 @@ use adk_core::{Content, Event, Part};
 use adk_rust::prelude::*;
 use futures::StreamExt;
 use maco_core::{
-    MacoError, MacoResult, ResumeContext, SseEnvelope, RUN_STATUS_AWAITING_USER, APP_NAME, USER_ID,
+    ensure_session_workspace, resolve_project_root, MacoError, MacoResult, ResumeContext,
+    SseEnvelope, RUN_STATUS_AWAITING_USER, APP_NAME, USER_ID,
 };
-use maco_db::{CallbackLogRepo, ElicitationRepo, ModelRecord, ReactRepo, ToolPolicyRecord, UsageRepo};
+use maco_db::{
+    CallbackLogRepo, ElicitationRepo, ModelRecord, ReactRepo, SessionMetaRepo, ToolPolicyRecord,
+    UsageRepo,
+};
 use adk_agent::guardrails::{GuardrailSet, PiiRedactor};
 use maco_governance::{pii_guardrail_enabled, pricing_from_model, redact_sse_payload, redact_text};
 use maco_react::ReactTools;
-use maco_storage::AdkStorage;
+use maco_storage::{AdkStorage, ArtifactStore};
 use maco_telemetry::MacoCallbackLogger;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
+use crate::artifact_capture::{
+    after_tool_with_artifacts, snapshot_scratch_files, ArtifactCaptureState,
+};
 use crate::callbacks::{
-    after_agent, after_model, after_tool, before_agent, before_model, before_tool_with_hitl,
+    after_agent, after_model, before_agent, before_model, before_tool_with_hitl,
 };
 use crate::elicitation::{
     respond_to_elicitation, ElicitationBroker, ElicitationRunContext, MacoElicitationHandler,
@@ -26,6 +34,7 @@ use crate::mcp_pool::McpPool;
 use crate::model_factory::build_llm;
 use crate::orchestrator::RunOrchestrator;
 use crate::run_stream::RunStreamRegistry;
+use crate::shell::MacoBashTool;
 use crate::skills::SkillLoader;
 use crate::usage::UsageContext;
 
@@ -41,6 +50,9 @@ pub struct MacoHarness {
     tool_policies: Arc<RwLock<Vec<ToolPolicyRecord>>>,
     mcp_pool: Arc<McpPool>,
     run_streams: RunStreamRegistry,
+    tmp_dir: PathBuf,
+    meta: SessionMetaRepo,
+    artifacts: Arc<ArtifactStore>,
 }
 
 impl MacoHarness {
@@ -54,6 +66,9 @@ impl MacoHarness {
         tool_policies: Vec<ToolPolicyRecord>,
         mcp_pool: Arc<McpPool>,
         run_streams: RunStreamRegistry,
+        tmp_dir: PathBuf,
+        meta: SessionMetaRepo,
+        artifacts: Arc<ArtifactStore>,
     ) -> Self {
         Self {
             storage,
@@ -66,7 +81,15 @@ impl MacoHarness {
             tool_policies: Arc::new(RwLock::new(tool_policies)),
             mcp_pool,
             run_streams,
+            tmp_dir,
+            meta,
+            artifacts,
         }
+    }
+
+    async fn session_project_root(&self, session_id: &str) -> MacoResult<Option<PathBuf>> {
+        let meta = self.meta.get(session_id).await?;
+        resolve_project_root(meta.as_ref().and_then(|m| m.project_root.as_deref()))
     }
 
     /// 热更新 HITL 工具策略（影响后续新 Run）。
@@ -138,11 +161,31 @@ impl MacoHarness {
         &self.storage
     }
 
-    fn build_instruction(&self) -> String {
-        let mut instruction = String::from(
+    fn build_instruction(
+        &self,
+        scratch_dir: &std::path::Path,
+        project_root: Option<&std::path::Path>,
+    ) -> String {
+        let scratch = scratch_dir.display();
+        let mut instruction = format!(
             "You are maco, a helpful personal assistant. \
-             Use update_plan to maintain a markdown task plan and upsert_todo for actionable items.",
+             Use update_plan to maintain a markdown task plan and upsert_todo for actionable items.\n\n\
+             Scratch directory (temp downloads, intermediates, throwaway scripts only): `{scratch}`\n\
+             - Put temporary/scratch artifacts here — not user project source files.\n",
         );
+        if let Some(root) = project_root {
+            instruction.push_str(&format!(
+                "\nProject root (bound for this session): `{path}`\n\
+                 - When editing the user's codebase, use paths under this directory.\n\
+                 - bash starts in this directory; relative paths resolve here.\n\
+                 - Add this path to MCP filesystem allowed roots if file tools cannot access it.\n",
+                path = root.display(),
+            ));
+        } else {
+            instruction.push_str(
+                "\nNo project root is bound — ask for the project path or use absolute paths the user provides.\n",
+            );
+        }
         let skills = SkillLoader::scan(None);
         if !skills.is_empty() {
             instruction.push_str("\n\nAvailable skills:\n");
@@ -215,6 +258,8 @@ impl MacoHarness {
         } else {
             self.orchestrator.start_run(session_id).await?
         };
+        let scratch_dir = ensure_session_workspace(&self.tmp_dir, session_id)?;
+        let project_root = self.session_project_root(session_id).await?;
         let run_id = run.id.clone();
         let run_id_for_task = run_id.clone();
         let (tx, rx) = mpsc::channel(256);
@@ -254,10 +299,21 @@ impl MacoHarness {
             model_name: model.name.clone(),
             pricing: pricing_from_model(model),
         });
+        let artifact_capture = Arc::new(ArtifactCaptureState {
+            session_id: session_id.to_string(),
+            run_id: run_id.clone(),
+            artifacts: Arc::clone(&self.artifacts),
+            scratch_dir: scratch_dir.clone(),
+            project_root: project_root.clone(),
+            scratch_known: Arc::new(Mutex::new(snapshot_scratch_files(&scratch_dir))),
+            sse_tx: tx.clone(),
+            streams: streams.clone(),
+            orchestrator: self.orchestrator.clone(),
+        });
 
         let mut builder = LlmAgentBuilder::new("maco")
             .description("maco personal agent")
-            .instruction(self.build_instruction())
+            .instruction(self.build_instruction(&scratch_dir, project_root.as_deref()))
             .model(llm)
             .input_guardrails(agent_guardrails())
             .output_guardrails(agent_guardrails())
@@ -266,11 +322,18 @@ impl MacoHarness {
             .before_model_callback(before_model(Arc::clone(&logger)))
             .after_model_callback(after_model(Arc::clone(&logger), Some(usage_ctx)))
             .before_tool_callback(before_tool_with_hitl(Arc::clone(&logger), hitl))
-            .after_tool_callback(after_tool(logger));
+            .after_tool_callback(after_tool_with_artifacts(
+                Arc::clone(&logger),
+                artifact_capture,
+            ));
 
         for tool in react_tools.as_tool_arcs() {
             builder = builder.tool(tool);
         }
+        builder = builder.tool(Arc::new(MacoBashTool::new(
+            scratch_dir.clone(),
+            project_root.clone(),
+        )));
         for ts in self.mcp_pool.toolsets().await {
             builder = builder.toolset(ts);
         }

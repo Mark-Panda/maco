@@ -15,6 +15,8 @@ pub struct SessionMetaRecord {
     pub model_id: Option<String>,
     /// 所属项目 ID（预留）。
     pub project_id: Option<String>,
+    /// 绑定的本地项目根目录（绝对路径）。
+    pub project_root: Option<String>,
     /// 生命周期状态。
     pub status: String,
     /// 创建时间。
@@ -35,13 +37,14 @@ impl SessionMetaRepo {
 
     pub async fn insert(&self, rec: &SessionMetaRecord) -> MacoResult<()> {
         sqlx::query(
-            "INSERT INTO maco_session_meta (session_id, title, model_id, project_id, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO maco_session_meta (session_id, title, model_id, project_id, project_root, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&rec.session_id)
         .bind(&rec.title)
         .bind(&rec.model_id)
         .bind(&rec.project_id)
+        .bind(&rec.project_root)
         .bind(&rec.status)
         .bind(&rec.created_at)
         .bind(&rec.updated_at)
@@ -53,7 +56,7 @@ impl SessionMetaRepo {
 
     pub async fn get(&self, session_id: &str) -> MacoResult<Option<SessionMetaRecord>> {
         sqlx::query_as::<_, SessionMetaRecord>(
-            "SELECT session_id, title, model_id, project_id, status, created_at, updated_at
+            "SELECT session_id, title, model_id, project_id, project_root, status, created_at, updated_at
              FROM maco_session_meta WHERE session_id = ?",
         )
         .bind(session_id)
@@ -64,7 +67,7 @@ impl SessionMetaRepo {
 
     pub async fn list_active(&self) -> MacoResult<Vec<SessionMetaRecord>> {
         sqlx::query_as::<_, SessionMetaRecord>(
-            "SELECT session_id, title, model_id, project_id, status, created_at, updated_at
+            "SELECT session_id, title, model_id, project_id, project_root, status, created_at, updated_at
              FROM maco_session_meta WHERE status NOT IN ('deleted') ORDER BY updated_at DESC",
         )
         .fetch_all(&self.pool)
@@ -78,7 +81,7 @@ impl SessionMetaRepo {
         }
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let q = format!(
-            "SELECT session_id, title, model_id, project_id, status, created_at, updated_at
+            "SELECT session_id, title, model_id, project_id, project_root, status, created_at, updated_at
              FROM maco_session_meta WHERE session_id IN ({placeholders})"
         );
         let mut query = sqlx::query_as::<_, SessionMetaRecord>(&q);
@@ -131,9 +134,40 @@ impl SessionMetaRepo {
         Ok(())
     }
 
+    /// 所有活跃会话中已绑定的项目根目录（去重）。
+    pub async fn list_distinct_project_roots(&self) -> MacoResult<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT project_root FROM maco_session_meta
+             WHERE project_root IS NOT NULL AND TRIM(project_root) != ''
+               AND status NOT IN ('deleted', 'pending_delete')",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| MacoError::database(e.to_string()))?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    pub async fn update_project_root(
+        &self,
+        session_id: &str,
+        project_root: Option<&str>,
+    ) -> MacoResult<()> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE maco_session_meta SET project_root = ?, updated_at = ? WHERE session_id = ?",
+        )
+        .bind(project_root)
+        .bind(now)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| MacoError::database(e.to_string()))?;
+        Ok(())
+    }
+
     pub async fn list_orphans(&self) -> MacoResult<Vec<SessionMetaRecord>> {
         sqlx::query_as::<_, SessionMetaRecord>(
-            "SELECT session_id, title, model_id, project_id, status, created_at, updated_at
+            "SELECT session_id, title, model_id, project_id, project_root, status, created_at, updated_at
              FROM maco_session_meta WHERE status IN ('orphan_create', 'pending_delete')",
         )
         .fetch_all(&self.pool)
@@ -145,13 +179,19 @@ impl SessionMetaRepo {
         Utc::now().to_rfc3339()
     }
 
-    pub fn new_record(session_id: String, title: Option<String>, model_id: Option<String>) -> SessionMetaRecord {
+    pub fn new_record(
+        session_id: String,
+        title: Option<String>,
+        model_id: Option<String>,
+        project_root: Option<String>,
+    ) -> SessionMetaRecord {
         let now = Self::now();
         SessionMetaRecord {
             session_id,
             title,
             model_id,
             project_id: None,
+            project_root,
             status: "active".into(),
             created_at: now.clone(),
             updated_at: now,

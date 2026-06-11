@@ -11,7 +11,6 @@ import {
   fetchJobs,
   fetchMemories,
   fetchModels,
-  downloadArtifact,
   fetchPlan,
   fetchRun,
   fetchSessionMessages,
@@ -38,6 +37,7 @@ import {
   type ModelView,
   type SessionMeta,
   patchTodo,
+  pickProjectDirectory,
   respondElicitation,
   resumeRun,
   revokeApiToken,
@@ -51,6 +51,7 @@ import {
 import { MacoIcon, type MacoIconName } from "./components/Icons";
 import { McpSettings } from "./components/McpSettings";
 import { ModelSettings } from "./components/ModelSettings";
+import { ArtifactPreviewModal } from "./components/ArtifactPreviewModal";
 import { SkillsPanel } from "./components/SkillsPanel";
 import { ToolPolicySettings } from "./components/ToolPolicySettings";
 import { useChatStore, type Message } from "./store/chat";
@@ -66,6 +67,10 @@ type SseEvent = {
     elicitation_id?: string;
     request_type?: string;
     url?: string;
+    id?: string;
+    filename?: string;
+    mime_type?: string;
+    size_bytes?: number;
   };
 };
 
@@ -190,8 +195,16 @@ export default function App() {
   const [artifacts, setArtifacts] = useState<
     Array<{ id: string; filename: string; mime_type: string; size_bytes: number }>
   >([]);
+  const [previewArtifactItem, setPreviewArtifactItem] = useState<{
+    id: string;
+    filename: string;
+    mime_type: string;
+    size_bytes: number;
+  } | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
+  const [projectRootDraft, setProjectRootDraft] = useState("");
+  const [pickingFolder, setPickingFolder] = useState(false);
   const [restored, setRestored] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatAbortRef = useRef<AbortController | null>(null);
@@ -215,11 +228,17 @@ export default function App() {
   useEffect(() => {
     if (restored || models.length === 0) return;
     const saved = getLastSessionId();
-    if (saved) {
-      loadSession(saved).finally(() => setRestored(true));
-    } else {
+    if (!saved) {
       setRestored(true);
+      return;
     }
+    listSessions()
+      .then((rows) => {
+        setSessions(rows);
+        const s = rows.find((r) => r.session_id === saved);
+        return loadSession(saved, s?.model_id, s?.project_root);
+      })
+      .finally(() => setRestored(true));
   }, [models, restored]);
 
   useEffect(() => {
@@ -283,13 +302,30 @@ export default function App() {
         url: ev.payload.url,
       });
     }
+    if (type === "artifact_created" && ev.payload?.id && ev.payload.filename) {
+      const item = {
+        id: ev.payload.id,
+        filename: ev.payload.filename,
+        mime_type: ev.payload.mime_type ?? "application/octet-stream",
+        size_bytes: ev.payload.size_bytes ?? 0,
+      };
+      setArtifacts((prev) => {
+        if (prev.some((a) => a.id === item.id)) return prev;
+        return [item, ...prev];
+      });
+    }
+    if (type === "done" && sessionId) {
+      listArtifacts(sessionId).then(setArtifacts).catch(() => undefined);
+    }
   }
 
   async function ensureSession() {
     if (sessionId) return sessionId;
     const modelId = selectedModelId || defaultModel?.id;
-    const s = await createSession(undefined, modelId);
+    const root = projectRootDraft.trim() || undefined;
+    const s = await createSession(undefined, modelId, root);
     setSessionId(s.session_id);
+    setSessions(await listSessions());
     return s.session_id;
   }
 
@@ -299,9 +335,14 @@ export default function App() {
     setTodos(await fetchTodos(id));
   }
 
-  async function loadSession(sid: string, modelId?: string | null) {
+  async function loadSession(
+    sid: string,
+    modelId?: string | null,
+    projectRoot?: string | null,
+  ) {
     setSessionId(sid);
     if (modelId) setSelectedModelId(modelId);
+    setProjectRootDraft(projectRoot ?? "");
     setActiveRunId(null);
     setPendingConfirm(null);
     setPendingElicitation(null);
@@ -364,6 +405,34 @@ export default function App() {
     setEditingTitle(false);
   }
 
+  async function pickProjectFolder() {
+    setPickingFolder(true);
+    try {
+      const result = await pickProjectDirectory();
+      if (result.cancelled || !result.path) return;
+      setProjectRootDraft(result.path);
+      if (sessionId) {
+        await updateSession(sessionId, { project_root: result.path });
+        setSessions(await listSessions());
+      }
+    } catch (e) {
+      pushMessage({ role: "assistant", content: String(e) });
+    } finally {
+      setPickingFolder(false);
+    }
+  }
+
+  async function clearProjectRoot() {
+    setProjectRootDraft("");
+    if (!sessionId) return;
+    try {
+      await updateSession(sessionId, { project_root: "" });
+      setSessions(await listSessions());
+    } catch (e) {
+      pushMessage({ role: "assistant", content: String(e) });
+    }
+  }
+
   async function send() {
     if (!input.trim() || loading) return;
     if (!selectedModelId && models.length === 0) {
@@ -392,6 +461,7 @@ export default function App() {
       chatAbortRef.current = ac;
       await streamChat(sid, text, handleSse, selectedModelId || undefined, ac.signal);
       await refreshTasks(sid);
+      setArtifacts(await listArtifacts(sid));
       listSessions().then(setSessions).catch(() => undefined);
     } catch (e) {
       pushMessage({ role: "assistant", content: String(e) });
@@ -527,6 +597,11 @@ export default function App() {
               </button>
             )
           )}
+          {sessionId && currentSession?.project_root && (
+            <span className="topbar-project" title={currentSession.project_root}>
+              项目: {currentSession.project_root}
+            </span>
+          )}
           <select
             className="model-select"
             value={selectedModelId}
@@ -554,6 +629,7 @@ export default function App() {
               setArtifacts([]);
               setPlan("");
               setTodos([]);
+              setProjectRootDraft("");
             }}
           >
             新对话
@@ -805,9 +881,14 @@ export default function App() {
                     <button
                       type="button"
                       className={`panel-card panel-card--clickable ${sessionId === s.session_id ? "active" : ""}`}
-                      onClick={() => loadSession(s.session_id, s.model_id)}
+                      onClick={() => loadSession(s.session_id, s.model_id, s.project_root)}
                     >
                       <span className="session-title">{s.title ?? s.session_id.slice(0, 8)}</span>
+                      {s.project_root && (
+                        <div className="model-meta session-project" title={s.project_root}>
+                          {s.project_root}
+                        </div>
+                      )}
                       <div className="model-meta">{s.updated_at}</div>
                     </button>
                     <button
@@ -841,43 +922,67 @@ export default function App() {
                     setArtifacts([]);
                     setPlan("");
                     setTodos([]);
+                    setProjectRootDraft("");
                   }}
                 >
                   新对话
                 </button>
+              </div>
+              <div className="panel-section" style={{ marginTop: 16 }}>
+                <h3>项目路径</h3>
+                <p className="panel-empty" style={{ paddingTop: 0 }}>
+                  选择本地项目文件夹后，bash 默认在该目录执行，并自动加入 MCP filesystem 允许列表。
+                  {!sessionId && " 可在发首条消息前选择，新建会话时会一并保存。"}
+                </p>
+                {projectRootDraft ? (
+                  <div className="project-path-display" title={projectRootDraft}>
+                    {projectRootDraft}
+                  </div>
+                ) : (
+                  <p className="project-path-empty">未选择项目文件夹</p>
+                )}
+                <div className="panel-actions">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    onClick={pickProjectFolder}
+                    disabled={pickingFolder}
+                  >
+                    {pickingFolder ? "选择中…" : "选择文件夹"}
+                  </button>
+                  {projectRootDraft && (
+                    <button type="button" className="btn btn-sm" onClick={clearProjectRoot}>
+                      清除
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}
 
           {sidebarTab === "tasks" && (
             <>
-              {artifacts.length > 0 && (
-                <div className="panel-section">
-                  <h3>附件</h3>
-                  {artifacts.map((a) => (
-                    <div key={a.id} className="panel-card">
+              <div className="panel-section">
+                <h3>文件产物</h3>
+                {artifacts.length === 0 ? (
+                  <p className="panel-empty">Agent 执行时写入的文件会出现在这里，点击可预览内容。</p>
+                ) : (
+                  artifacts.map((a) => (
+                    <button
+                      key={a.id}
+                      type="button"
+                      className="artifact-card"
+                      onClick={() => sessionId && setPreviewArtifactItem(a)}
+                      disabled={!sessionId}
+                    >
                       <strong>{a.filename}</strong>
                       <div className="model-meta">
                         {a.mime_type} · {(a.size_bytes / 1024).toFixed(1)} KB
                       </div>
-                      {sessionId && (
-                        <button
-                          type="button"
-                          className="btn btn-sm"
-                          style={{ marginTop: 6 }}
-                          onClick={() =>
-                            downloadArtifact(sessionId, a.id, a.filename).catch((err) =>
-                              pushMessage({ role: "assistant", content: String(err) }),
-                            )
-                          }
-                        >
-                          下载
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
+                    </button>
+                  ))
+                )}
+              </div>
               <div className="panel-section">
                 <h3>计划</h3>
                 <div className="panel-card">
@@ -1194,6 +1299,14 @@ export default function App() {
         </div>
           </aside>
         </div>
+      )}
+
+      {previewArtifactItem && sessionId && (
+        <ArtifactPreviewModal
+          sessionId={sessionId}
+          artifact={previewArtifactItem}
+          onClose={() => setPreviewArtifactItem(null)}
+        />
       )}
     </div>
   );

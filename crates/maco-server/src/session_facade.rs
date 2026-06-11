@@ -9,8 +9,8 @@ use chrono::Utc;
 use maco_storage::memory_admin;
 use adk_session::{CreateRequest, DeleteRequest, GetRequest, ListRequest};
 use maco_core::{
-    ChatMessage, MacoError, MacoResult, MemoryListItem, MemoryListResponse, MemorySearchResponse,
-    SessionMessagesResponse, APP_NAME, USER_ID,
+    resolve_project_root, ChatMessage, MacoError, MacoResult, MemoryListItem, MemoryListResponse,
+    MemorySearchResponse, SessionMessagesResponse, APP_NAME, USER_ID,
 };
 use maco_db::{ModelRecord, ModelRepo, SessionMetaRecord, SessionMetaRepo};
 use maco_storage::AdkStorage;
@@ -33,7 +33,10 @@ impl SessionFacade {
         &self,
         title: Option<String>,
         model_id: Option<String>,
+        project_root: Option<String>,
     ) -> MacoResult<SessionMetaRecord> {
+        let project_root = resolve_project_root(project_root.as_deref())?
+            .map(|p| p.to_string_lossy().into_owned());
         let mut state = std::collections::HashMap::new();
         if let Some(ref mid) = model_id {
             state.insert("user:model".into(), json!(mid));
@@ -50,7 +53,7 @@ impl SessionFacade {
             .await
             .map_err(|e| MacoError::Adk(e.to_string()))?;
         let session_id = session.id().to_string();
-        let rec = SessionMetaRepo::new_record(session_id.clone(), title, model_id);
+        let rec = SessionMetaRepo::new_record(session_id.clone(), title, model_id, project_root);
         if let Err(e) = self.meta.insert(&rec).await {
             let _ = self
                 .adk
@@ -85,7 +88,7 @@ impl SessionFacade {
         for s in adk_sessions {
             let sid = s.id().to_string();
             if !known.contains(&sid) {
-                let rec = SessionMetaRepo::new_record(sid.clone(), None, None);
+                let rec = SessionMetaRepo::new_record(sid.clone(), None, None, None);
                 let _ = self.meta.insert(&rec).await;
                 metas.push(rec);
             }
@@ -113,6 +116,19 @@ impl SessionFacade {
             .map_err(|e| MacoError::Adk(e.to_string()))?;
         self.meta.update_status(session_id, "deleted").await?;
         Ok(())
+    }
+
+    /// 绑定或清除会话的项目根目录。
+    pub async fn set_project_root(
+        &self,
+        session_id: &str,
+        project_root: Option<&str>,
+    ) -> MacoResult<()> {
+        let normalized = resolve_project_root(project_root)?
+            .map(|p| p.to_string_lossy().into_owned());
+        self.meta
+            .update_project_root(session_id, normalized.as_deref())
+            .await
     }
 
     /// 更新会话绑定模型（元数据 + adk state_delta `user:model`）。

@@ -138,11 +138,19 @@ export async function deleteModel(id: string) {
   if (!res.ok) throw new Error(await res.text());
 }
 
-export async function createSession(title?: string, modelId?: string) {
+export async function createSession(
+  title?: string,
+  modelId?: string,
+  projectRoot?: string,
+) {
   const res = await fetch(`${API}/sessions`, {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ title: title ?? "New chat", model_id: modelId }),
+    body: JSON.stringify({
+      title: title ?? "New chat",
+      model_id: modelId,
+      project_root: projectRoot?.trim() || undefined,
+    }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json() as Promise<{ session_id: string }>;
@@ -338,6 +346,7 @@ export type SessionMeta = {
   session_id: string;
   title: string | null;
   model_id: string | null;
+  project_root: string | null;
   status: string;
   created_at: string;
   updated_at: string;
@@ -521,7 +530,7 @@ export async function deleteSession(sessionId: string) {
 
 export async function updateSession(
   sessionId: string,
-  body: { title?: string; model_id?: string },
+  body: { title?: string; model_id?: string; project_root?: string },
 ) {
   const res = await fetch(`${API}/sessions/${sessionId}`, {
     method: "PATCH",
@@ -568,20 +577,42 @@ export async function listArtifacts(sessionId: string) {
   return res.json() as Promise<ArtifactRecord[]>;
 }
 
+export async function fetchArtifactBlob(sessionId: string, artifactId: string): Promise<Blob> {
+  const headers: Record<string, string> = {};
+  const token = getApiToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(`${API}/sessions/${sessionId}/artifacts/${artifactId}`, { headers });
+  if (!res.ok) throw new Error(await res.text());
+  return res.blob();
+}
+
+export async function previewArtifact(
+  sessionId: string,
+  artifactId: string,
+): Promise<{
+  id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  previewable: boolean;
+  kind: "text" | "image" | "binary";
+  content: string | null;
+  truncated: boolean;
+}> {
+  const res = await fetch(
+    `${API}/sessions/${sessionId}/artifacts/${artifactId}/preview`,
+    { headers: authHeaders() },
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function downloadArtifact(
   sessionId: string,
   artifactId: string,
   filename: string,
 ) {
-  const headers: Record<string, string> = {};
-  const token = getApiToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(
-    `${API}/sessions/${sessionId}/artifacts/${artifactId}`,
-    { headers },
-  );
-  if (!res.ok) throw new Error(await res.text());
-  const blob = await res.blob();
+  const blob = await fetchArtifactBlob(sessionId, artifactId);
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -675,4 +706,13 @@ export async function reloadToolPolicies() {
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json() as Promise<{ reloaded: boolean; enabled_count: number }>;
+}
+
+export async function pickProjectDirectory(): Promise<{ cancelled: boolean; path?: string }> {
+  const res = await fetch(`${API}/system/pick-directory`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }

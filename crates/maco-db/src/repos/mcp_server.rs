@@ -63,6 +63,14 @@ impl McpServerRepo {
             .map_err(|e| MacoError::database(e.to_string()))
     }
 
+    pub async fn get_by_name(&self, name: &str) -> MacoResult<Option<McpServerRecord>> {
+        sqlx::query_as::<_, McpServerRecord>("SELECT * FROM maco_mcp_servers WHERE name = ?")
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| MacoError::database(e.to_string()))
+    }
+
     pub async fn insert(
         &self,
         name: &str,
@@ -134,5 +142,71 @@ impl McpServerRepo {
             .map_err(|e| MacoError::database(e.to_string()))?;
         Ok(r.rows_affected() > 0)
     }
+}
+
+const FILESYSTEM_MCP_NAME: &str = "filesystem";
+const FILESYSTEM_MCP_PACKAGE: &str = "@modelcontextprotocol/server-filesystem";
+
+fn filesystem_mcp_args(allowed_roots: &[String]) -> MacoResult<String> {
+    let mut args = vec![
+        "-y".to_string(),
+        FILESYSTEM_MCP_PACKAGE.to_string(),
+    ];
+    args.extend(allowed_roots.iter().cloned());
+    serde_json::to_string(&args).map_err(|e| MacoError::config(format!("mcp args json: {e}")))
+}
+
+/// 首次初始化时注册 filesystem MCP，根目录指向 `tmp_dir`。
+pub async fn seed_default_filesystem_mcp(
+    repo: &McpServerRepo,
+    tmp_dir: &std::path::Path,
+) -> MacoResult<()> {
+    if repo.get_by_name(FILESYSTEM_MCP_NAME).await?.is_some() {
+        return Ok(());
+    }
+    let root = tmp_dir.to_string_lossy().into_owned();
+    let args = filesystem_mcp_args(&[root])?;
+    repo.insert(FILESYSTEM_MCP_NAME, "stdio", Some("npx"), &args, None, "{}")
+        .await?;
+    Ok(())
+}
+
+/// 根据 `tmp_dir` + 各会话 `project_root` 重建 filesystem MCP 允许目录并去重。
+pub async fn rebuild_filesystem_mcp_roots(
+    mcp_repo: &McpServerRepo,
+    meta_repo: &crate::SessionMetaRepo,
+    tmp_dir: &std::path::Path,
+) -> MacoResult<bool> {
+    let mut roots: Vec<String> = vec![tmp_dir.to_string_lossy().into_owned()];
+    roots.extend(meta_repo.list_distinct_project_roots().await?);
+
+    let mut seen = std::collections::HashSet::new();
+    roots.retain(|r| seen.insert(r.clone()));
+
+    let args = filesystem_mcp_args(&roots)?;
+
+    if let Some(fs) = mcp_repo.get_by_name(FILESYSTEM_MCP_NAME).await? {
+        if fs.transport != "stdio" {
+            return Ok(false);
+        }
+        mcp_repo
+            .update(
+                &fs.id,
+                &fs.name,
+                &fs.transport,
+                fs.command.as_deref().or(Some("npx")),
+                &args,
+                fs.url.as_deref(),
+                &fs.env,
+                fs.enabled != 0,
+            )
+            .await?;
+        return Ok(true);
+    }
+
+    mcp_repo
+        .insert(FILESYSTEM_MCP_NAME, "stdio", Some("npx"), &args, None, "{}")
+        .await?;
+    Ok(true)
 }
 

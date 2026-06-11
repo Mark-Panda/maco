@@ -6,7 +6,11 @@ pub mod model_config;
 pub mod redact;
 pub mod types;
 
-pub use config::{load_config, ensure_data_dirs, default_data_dir, default_skills_dir, sqlite_url, adk_session_url, adk_memory_url, maco_db_url, AppConfig, DataPaths, APP_NAME, USER_ID};
+pub use config::{
+    default_data_dir, default_skills_dir, default_tmp_dir, ensure_data_dirs, ensure_session_workspace,
+    expand_tilde_path, load_config, maco_home_dir, resolve_project_root, session_workspace_dir,
+    sqlite_url, adk_session_url, adk_memory_url, maco_db_url, AppConfig, DataPaths, APP_NAME, USER_ID,
+};
 pub use error::{MacoError, MacoResult};
 pub use model_config::{
     api_key_from_config, api_key_preview, has_stored_api_key, merge_api_key, redact_config_for_api,

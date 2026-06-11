@@ -24,6 +24,8 @@ pub struct SessionMetaDoc {
     pub title: Option<String>,
     /// 绑定模型 ID。
     pub model_id: Option<String>,
+    /// 绑定的本地项目根目录。
+    pub project_root: Option<String>,
     /// 生命周期状态（`active` / `deleted` 等）。
     pub status: String,
 }
@@ -35,6 +37,8 @@ pub struct CreateSessionDoc {
     pub title: Option<String>,
     /// 初始模型 ID。
     pub model_id: Option<String>,
+    /// 绑定的本地项目根目录。
+    pub project_root: Option<String>,
 }
 
 /// `POST /chat` 请求体。
@@ -91,6 +95,15 @@ pub struct ModelUpsertDoc {
 pub struct MemorySearchQueryDoc {
     /// 搜索关键词。
     pub q: String,
+}
+
+/// `POST /system/pick-directory` 响应体。
+#[derive(utoipa::ToSchema, serde::Serialize)]
+pub struct PickDirectoryDoc {
+    /// 用户是否取消了选择对话框。
+    pub cancelled: bool,
+    /// 选中的文件夹绝对路径（未取消时存在）。
+    pub path: Option<String>,
 }
 
 /// `GET /guardrail/status` 响应体。
@@ -193,6 +206,14 @@ fn health_doc() {}
     responses((status = 200, description = "治理/脱敏配置", body = GuardrailStatusDoc))
 )]
 fn guardrail_status_doc() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/system/pick-directory",
+    tag = "system",
+    responses((status = 200, description = "本机文件夹选择结果", body = PickDirectoryDoc))
+)]
+fn pick_directory_doc() {}
 
 #[utoipa::path(
     get,
@@ -509,6 +530,7 @@ fn list_tokens_doc() {}
     paths(
         health_doc,
         guardrail_status_doc,
+        pick_directory_doc,
         list_sessions_doc,
         create_session_doc,
         export_session_doc,
@@ -546,6 +568,7 @@ fn list_tokens_doc() {}
         ModelUpsertDoc,
         MemorySearchQueryDoc,
         GuardrailStatusDoc,
+        PickDirectoryDoc,
         RunStatusDoc,
         ResumeRunDoc,
         ElicitationRespondDoc,

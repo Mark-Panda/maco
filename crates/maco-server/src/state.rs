@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use maco_db::{
-    init_pool, seed_defaults, seed_tool_policies, ApiTokenRepo, ArtifactRepo, CallbackLogRepo,
-    ElicitationRepo, JobRepo, McpServerRepo, ModelRepo, ReactRepo, RunRepo, SessionMetaRepo,
-    SettingsRepo, ToolPolicyRepo, UsageRepo,
+    init_pool, rebuild_filesystem_mcp_roots, seed_default_filesystem_mcp, seed_defaults,
+    seed_tool_policies, ApiTokenRepo, ArtifactRepo, CallbackLogRepo, ElicitationRepo, JobRepo,
+    McpServerRepo, ModelRepo, ReactRepo, RunRepo, SessionMetaRepo, SettingsRepo, ToolPolicyRepo,
+    UsageRepo,
 };
 use maco_governance::auth_disabled;
 use maco_harness::{
@@ -53,9 +54,19 @@ pub struct AppState {
     pub mcp_pool: Arc<McpPool>,
     /// 附件存储。
     pub artifacts: Arc<ArtifactStore>,
+    /// Agent 临时目录根路径。
+    pub tmp_dir: std::path::PathBuf,
 }
 
 impl AppState {
+    /// 将会话 `project_root` 与 `tmp_dir` 同步到 filesystem MCP 并热重载连接池。
+    pub async fn sync_filesystem_mcp(&self) -> maco_core::MacoResult<()> {
+        if rebuild_filesystem_mcp_roots(&self.mcp_servers, &self.meta, &self.tmp_dir).await? {
+            self.mcp_pool.reload().await?;
+        }
+        Ok(())
+    }
+
     /// 初始化连接池、迁移、默认种子、adk 存储、Harness 与启动对账。
     pub async fn new(bind_addr: String, db_path: &std::path::Path, paths: &maco_core::DataPaths) -> maco_core::MacoResult<Self> {
         let db = init_pool(db_path).await?;
@@ -81,6 +92,7 @@ impl AppState {
         let elicitation = ElicitationRepo::new(db.pool.clone());
         let jobs = JobRepo::new(db.pool.clone());
         let mcp_servers = McpServerRepo::new(db.pool.clone());
+        seed_default_filesystem_mcp(&mcp_servers, &paths.tmp_dir).await?;
         let artifact_repo = ArtifactRepo::new(db.pool.clone());
         let artifacts = Arc::new(ArtifactStore::new(paths.artifacts_dir.clone(), artifact_repo));
 
@@ -96,9 +108,14 @@ impl AppState {
             elicitation_broker,
             Some(run_streams.clone()),
         );
+        if let Err(e) = rebuild_filesystem_mcp_roots(&mcp_servers, &meta, &paths.tmp_dir).await {
+            tracing::warn!("rebuild filesystem mcp on startup: {e}");
+        }
+
         let mcp_pool = Arc::new(McpPool::new(
             McpServerRepo::new(db.pool.clone()),
             dynamic_elicitation,
+            paths.tmp_dir.clone(),
         ));
         if let Err(e) = mcp_pool.reload().await {
             tracing::warn!("mcp pool initial reload: {e}");
@@ -115,6 +132,9 @@ impl AppState {
             policies,
             mcp_pool.clone(),
             run_streams,
+            paths.tmp_dir.clone(),
+            SessionMetaRepo::new(db.pool.clone()),
+            artifacts.clone(),
         ));
 
         Ok(Self {
@@ -135,6 +155,7 @@ impl AppState {
             harness,
             mcp_pool,
             artifacts,
+            tmp_dir: paths.tmp_dir.clone(),
         })
     }
 }

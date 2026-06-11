@@ -1,6 +1,7 @@
 //! MCP 连接管理：stdio 走 `McpServerManager`，sse 走 HTTP toolset。
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +19,7 @@ use crate::elicitation::DynamicElicitationHandler;
 pub struct McpPool {
     repo: McpServerRepo,
     elicitation: Arc<DynamicElicitationHandler>,
+    tmp_dir: PathBuf,
     inner: Arc<RwLock<McpPoolState>>,
 }
 
@@ -27,13 +29,18 @@ struct McpPoolState {
 }
 
 impl McpPool {
-    pub fn new(repo: McpServerRepo, elicitation: Arc<DynamicElicitationHandler>) -> Self {
+    pub fn new(
+        repo: McpServerRepo,
+        elicitation: Arc<DynamicElicitationHandler>,
+        tmp_dir: PathBuf,
+    ) -> Self {
         let manager = Arc::new(McpServerManager::new(HashMap::new()).with_elicitation_handler(
             elicitation.clone() as Arc<dyn ElicitationHandler>,
         ));
         Self {
             repo,
             elicitation,
+            tmp_dir,
             inner: Arc::new(RwLock::new(McpPoolState {
                 manager,
                 http_toolsets: HashMap::new(),
@@ -45,6 +52,10 @@ impl McpPool {
         self.elicitation.clone()
     }
 
+    pub fn tmp_dir(&self) -> &Path {
+        &self.tmp_dir
+    }
+
     /// 从 DB 重载并启动全部已启用 MCP 服务。
     pub async fn reload(&self) -> MacoResult<()> {
         let records = self.repo.list_enabled().await?;
@@ -53,7 +64,7 @@ impl McpPool {
 
         for rec in records {
             if rec.transport == "stdio" {
-                if let Some(cfg) = record_to_stdio_config(&rec)? {
+                if let Some(cfg) = record_to_stdio_config(&rec, &self.tmp_dir)? {
                     stdio_configs.insert(rec.name.clone(), cfg);
                 }
             } else if rec.transport == "sse" {
@@ -156,23 +167,39 @@ mod tests {
 
     #[test]
     fn stdio_config_from_record() {
-        let cfg = record_to_stdio_config(&sample_stdio_record())
+        let tmp = std::env::temp_dir();
+        let cfg = record_to_stdio_config(&sample_stdio_record(), &tmp)
             .expect("ok")
             .expect("some");
         assert_eq!(cfg.command, "npx");
         assert_eq!(cfg.args.len(), 3);
         assert_eq!(cfg.env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(cfg.env.get("TMPDIR").map(String::as_str), Some(tmp.to_str().unwrap()));
     }
 
     #[test]
     fn sse_record_returns_none_for_stdio_config() {
         let mut rec = sample_stdio_record();
         rec.transport = "sse".into();
-        assert!(record_to_stdio_config(&rec).expect("ok").is_none());
+        assert!(record_to_stdio_config(&rec, std::path::Path::new("/tmp"))
+            .expect("ok")
+            .is_none());
     }
 }
 
-fn record_to_stdio_config(rec: &McpServerRecord) -> MacoResult<Option<McpServerConfig>> {
+fn merge_tmp_env(
+    env: &mut std::collections::HashMap<String, String>,
+    tmp_dir: &Path,
+) {
+    let tmp = tmp_dir.to_string_lossy().to_string();
+    env.entry("TMPDIR".into()).or_insert_with(|| tmp.clone());
+    env.entry("TEMP".into()).or_insert_with(|| tmp.clone());
+    env.entry("TMP".into()).or_insert(tmp);
+    env.entry("MACO_TMP".into())
+        .or_insert_with(|| tmp_dir.to_string_lossy().to_string());
+}
+
+fn record_to_stdio_config(rec: &McpServerRecord, tmp_dir: &Path) -> MacoResult<Option<McpServerConfig>> {
     if rec.transport != "stdio" {
         return Ok(None);
     }
@@ -183,8 +210,9 @@ fn record_to_stdio_config(rec: &McpServerRecord) -> MacoResult<Option<McpServerC
         .ok_or_else(|| MacoError::config("stdio mcp server requires command"))?;
     let args: Vec<String> = serde_json::from_str(&rec.args)
         .map_err(|e| MacoError::config(format!("invalid mcp args json: {e}")))?;
-    let env: std::collections::HashMap<String, String> = serde_json::from_str(&rec.env)
+    let mut env: std::collections::HashMap<String, String> = serde_json::from_str(&rec.env)
         .map_err(|e| MacoError::config(format!("invalid mcp env json: {e}")))?;
+    merge_tmp_env(&mut env, tmp_dir);
     Ok(Some(McpServerConfig {
         command: command.to_string(),
         args,

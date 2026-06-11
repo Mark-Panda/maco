@@ -43,6 +43,10 @@ pub fn api_router() -> Router<AppState> {
             "/sessions/{id}/artifacts/{artifact_id}",
             get(download_artifact),
         )
+        .route(
+            "/sessions/{id}/artifacts/{artifact_id}/preview",
+            get(preview_artifact),
+        )
         .route("/sessions/{id}/export", get(export_session))
         // Run 状态查询、HITL/Elicitation 恢复
         .route("/sessions/{id}/runs/active", get(get_active_run))
@@ -86,6 +90,23 @@ pub fn api_router() -> Router<AppState> {
         .route("/jobs", get(list_jobs).post(create_job))
         .route("/jobs/{id}", patch(update_job).delete(delete_job))
         .route("/jobs/{id}/run", post(run_job_now))
+        // 本机系统能力（原生文件夹选择等）
+        .route("/system/pick-directory", post(pick_directory))
+}
+
+/// `POST /system/pick-directory` — 弹出本机原生文件夹选择对话框，返回绝对路径。
+async fn pick_directory() -> Result<Json<serde_json::Value>, ApiError> {
+    let picked = tokio::task::spawn_blocking(crate::directory_picker::pick_directory_blocking)
+        .await
+        .map_err(|e| MacoError::config(format!("pick directory task: {e}")))?;
+
+    match picked {
+        Some(path) => Ok(Json(serde_json::json!({
+            "cancelled": false,
+            "path": path.to_string_lossy(),
+        }))),
+        None => Ok(Json(serde_json::json!({ "cancelled": true }))),
+    }
 }
 
 /// `GET /guardrail/status` — 返回 PII 脱敏与日志脱敏配置状态。
@@ -120,6 +141,8 @@ struct CreateSessionBody {
     title: Option<String>,
     /// 初始绑定模型 ID（写入 adk state `user:model`）。
     model_id: Option<String>,
+    /// 绑定的本地项目根目录（绝对路径，可含 `~`）。
+    project_root: Option<String>,
 }
 
 /// `POST /sessions` — 创建新会话。
@@ -127,12 +150,16 @@ async fn create_session(
     State(state): State<AppState>,
     Json(body): Json<CreateSessionBody>,
 ) -> Result<Json<maco_db::SessionMetaRecord>, ApiError> {
-    Ok(Json(
-        state
-            .facade
-            .create_session(body.title, body.model_id)
-            .await?,
-    ))
+    let rec = state
+        .facade
+        .create_session(body.title, body.model_id, body.project_root)
+        .await?;
+    if rec.project_root.is_some() {
+        if let Err(e) = state.sync_filesystem_mcp().await {
+            tracing::warn!("sync filesystem mcp after create session: {e}");
+        }
+    }
+    Ok(Json(rec))
 }
 
 /// `PATCH /sessions/{id}` 请求体。
@@ -142,6 +169,8 @@ struct UpdateSessionBody {
     title: Option<String>,
     /// 新模型 ID（可选，会同步 adk state）。
     model_id: Option<String>,
+    /// 项目根目录；传空字符串表示清除绑定。
+    project_root: Option<String>,
 }
 
 /// `GET /sessions/{id}/messages` — 加载会话历史消息（供前端恢复对话）。
@@ -167,6 +196,17 @@ async fn update_session(
             .update_title_model(&id, body.title.as_deref(), body.model_id.as_deref())
             .await?;
     }
+    if let Some(pr) = body.project_root {
+        let raw = if pr.trim().is_empty() {
+            None
+        } else {
+            Some(pr.as_str())
+        };
+        state.facade.set_project_root(&id, raw).await?;
+        if let Err(e) = state.sync_filesystem_mcp().await {
+            tracing::warn!("sync filesystem mcp after update project_root: {e}");
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -176,6 +216,9 @@ async fn delete_session(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     state.facade.delete_session(&id).await?;
+    if let Err(e) = state.sync_filesystem_mcp().await {
+        tracing::warn!("sync filesystem mcp after delete session: {e}");
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -484,6 +527,54 @@ async fn patch_todo(
             .patch_todo_status(&id, &task_key, &body.status)
             .await?,
     ))
+}
+
+/// `GET /sessions/{id}/artifacts/{artifact_id}/preview` — 返回可预览的文本内容或元数据。
+async fn preview_artifact(
+    State(state): State<AppState>,
+    Path((session_id, artifact_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use maco_governance::is_previewable_mime;
+
+    const PREVIEW_TEXT_LIMIT: usize = 512 * 1024;
+    let (record, bytes) = state
+        .artifacts
+        .read(&session_id, &artifact_id)
+        .await?;
+    let previewable = is_previewable_mime(&record.mime_type);
+    let kind = if record.mime_type.starts_with("image/") {
+        "image"
+    } else if record.mime_type.starts_with("text/")
+        || record.mime_type == "application/json"
+        || record.mime_type == "application/javascript"
+        || record.mime_type == "application/xml"
+    {
+        "text"
+    } else {
+        "binary"
+    };
+    let mut content: Option<String> = None;
+    let mut truncated = false;
+    if previewable && kind == "text" {
+        let text = String::from_utf8_lossy(&bytes);
+        let limit = PREVIEW_TEXT_LIMIT;
+        if text.len() > limit {
+            content = Some(text[..limit].to_string());
+            truncated = true;
+        } else {
+            content = Some(text.into_owned());
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "id": record.id,
+        "filename": record.filename,
+        "mime_type": record.mime_type,
+        "size_bytes": record.size_bytes,
+        "previewable": previewable,
+        "kind": kind,
+        "content": content,
+        "truncated": truncated,
+    })))
 }
 
 /// `GET /sessions/{id}/artifacts/{artifact_id}` — 下载附件二进制。

@@ -1,6 +1,7 @@
 //! maco HTTP 服务入口：`init` / `backup` 子命令与 Axum 路由装配。
 
 mod auth;
+mod directory_picker;
 mod export;
 mod models_api;
 mod openapi;
@@ -17,7 +18,10 @@ use utoipa_swagger_ui::SwaggerUi;
 use clap::{Parser, Subcommand};
 use maco_governance::auth_disabled;
 use maco_core::{ensure_data_dirs, load_config, MacoResult};
-use maco_db::{wal_checkpoint, wal_checkpoint_adk, ModelRecord, ModelRepo, SettingsRepo};
+use maco_db::{
+    seed_default_filesystem_mcp, wal_checkpoint, wal_checkpoint_adk, McpServerRepo, ModelRecord,
+    ModelRepo, SettingsRepo,
+};
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::auth_middleware;
@@ -68,6 +72,7 @@ async fn run_init(paths: &maco_core::DataPaths) -> MacoResult<()> {
     let db = maco_db::init_pool(&paths.maco_db).await?;
     let settings = SettingsRepo::new(db.pool.clone());
     maco_db::seed_defaults(&settings).await?;
+    seed_default_filesystem_mcp(&McpServerRepo::new(db.pool.clone()), &paths.tmp_dir).await?;
     let _ = maco_storage::AdkStorage::open(paths).await?;
     seed_default_model(&db).await?;
     tracing::info!("init complete at {}", paths.maco_db.display());

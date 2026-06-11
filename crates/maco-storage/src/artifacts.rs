@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use maco_core::{MacoError, MacoResult};
 use maco_db::{ArtifactRecord, ArtifactRepo};
-use maco_governance::validate_artifact;
+use maco_governance::{mime_for_artifact, validate_artifact};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -62,6 +62,37 @@ impl ArtifactStore {
     /// 附件元数据仓库（列表查询等）。
     pub fn repo(&self) -> &ArtifactRepo {
         &self.repo
+    }
+
+    /// 从磁盘路径导入为会话附件（Agent 写文件等）；同 checksum 已存在则跳过。
+    pub async fn import_from_path(
+        &self,
+        session_id: &str,
+        source_path: &Path,
+    ) -> MacoResult<Option<ArtifactRecord>> {
+        if !source_path.is_file() {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(source_path)
+            .map_err(|e| MacoError::config(format!("read source file: {e}")))?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let checksum = hex::encode(Sha256::digest(&bytes));
+        let existing = self.repo.list_for_session(session_id).await?;
+        if existing.iter().any(|r| r.checksum.as_deref() == Some(checksum.as_str())) {
+            return Ok(None);
+        }
+        let filename = source_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let mime_type = mime_for_artifact(&filename, &bytes);
+        let record = self
+            .save(session_id, &filename, &mime_type, &bytes)
+            .await?;
+        Ok(Some(record))
     }
 
     /// 读取会话附件二进制（校验 session 归属）。
