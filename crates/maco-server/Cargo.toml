@@ -34,7 +34,7 @@ clap = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 utoipa = { version = "5.5.0", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 rfd = { workspace = true }
