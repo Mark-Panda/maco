@@ -1,3 +1,5 @@
+//! maco Agent 运行时：组装 adk `Runner`、ReAct 工具、HITL、Elicitation 与 SSE 事件流。
+
 pub mod callbacks;
 pub mod elicitation;
 pub mod harness;

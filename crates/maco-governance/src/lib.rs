@@ -1,3 +1,5 @@
+//! 治理层：鉴权 scope、HITL 策略、PII 脱敏、artifact 校验、用量估价。
+
 pub mod artifact;
 pub mod auth;
 pub mod guardrail;
@@ -15,6 +17,7 @@ pub use guardrail::{
     pii_guardrail_enabled, prepare_log_payload, redact_sse_payload, redact_text,
 };
 
+/// 对任意文本做基础 PII 脱敏（委托 `guardrail::redact_text`）。
 pub fn redact_basic(text: &str) -> String {
     redact_text(text)
 }

@@ -1,3 +1,5 @@
+//! 直接查询 adk `memory.db` 的管理接口（列表等 adk API 未暴露的能力）。
+
 use std::path::Path;
 
 use maco_core::{adk_memory_url, MacoError, MacoResult, APP_NAME, USER_ID};
@@ -5,12 +7,18 @@ use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
 
+/// adk memory.db 原始行（管理 API 用）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MemoryRow {
+    /// 行 ID。
     pub id: i64,
+    /// 记忆文本。
     pub content: String,
+    /// 作者标识。
     pub author: String,
+    /// 写入时间。
     pub timestamp: String,
+    /// 来源会话 ID。
     pub session_id: String,
 }
 

@@ -1,9 +1,15 @@
+//! 工具调用 HITL：根据 `ToolPolicyRecord` 解析 allow / confirm / deny。
+
 use maco_db::ToolPolicyRecord;
 
+/// 工具策略判定结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyAction {
+    /// 直接执行。
     Allow,
+    /// 拒绝执行。
     Deny,
+    /// 需用户确认后执行（HITL）。
     Confirm,
 }
 

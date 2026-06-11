@@ -1,3 +1,5 @@
+//! Session 门面：协调 adk Session/Memory 与 `maco_session_meta` 业务元数据。
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -14,16 +16,19 @@ use maco_db::{ModelRecord, ModelRepo, SessionMetaRecord, SessionMetaRepo};
 use maco_storage::AdkStorage;
 use serde_json::json;
 
+/// 对外统一的 Session + Memory 操作入口（HTTP 层主要依赖此类型）。
 pub struct SessionFacade {
     adk: Arc<AdkStorage>,
     meta: SessionMetaRepo,
 }
 
 impl SessionFacade {
+    /// 构造门面，注入 adk 存储与元数据仓库。
     pub fn new(adk: Arc<AdkStorage>, meta: SessionMetaRepo) -> Self {
         Self { adk, meta }
     }
 
+    /// 在 adk 与 `maco_session_meta` 中同时创建会话；失败时回滚 adk 侧。
     pub async fn create_session(
         &self,
         title: Option<String>,
@@ -61,6 +66,7 @@ impl SessionFacade {
         Ok(rec)
     }
 
+    /// 列出会话：与 adk 对齐，并为缺失元数据的 session 自动补建记录。
     pub async fn list_sessions(&self) -> MacoResult<Vec<SessionMetaRecord>> {
         let adk_sessions = self
             .adk
@@ -88,6 +94,7 @@ impl SessionFacade {
         Ok(metas)
     }
 
+    /// 软删 → 清理 memory 引用 → 删除 adk session → 标记 deleted。
     pub async fn delete_session(&self, session_id: &str) -> MacoResult<()> {
         self.meta.update_status(session_id, "pending_delete").await?;
         self.adk
@@ -108,6 +115,7 @@ impl SessionFacade {
         Ok(())
     }
 
+    /// 更新会话绑定模型（元数据 + adk state_delta `user:model`）。
     pub async fn set_model(&self, session_id: &str, model_id: &str) -> MacoResult<()> {
         self.meta
             .update_title_model(session_id, None, Some(model_id))
@@ -129,6 +137,7 @@ impl SessionFacade {
         Ok(())
     }
 
+    /// 解析本次 Run 使用的模型：请求覆盖 > session state > meta > 默认模型。
     pub async fn resolve_model(
         &self,
         models: &ModelRepo,
@@ -179,6 +188,7 @@ impl SessionFacade {
             .ok_or_else(|| MacoError::not_found("default model"))
     }
 
+    /// 启动时修复孤儿/半删会话（`orphan_create` / `pending_delete`）。
     pub async fn reconcile(&self) -> MacoResult<()> {
         let orphans = self.meta.list_orphans().await?;
         for o in orphans {
@@ -204,6 +214,7 @@ impl SessionFacade {
         Ok(())
     }
 
+    /// 分页列出 adk memory 条目（管理 API）。
     pub async fn memory_list(&self, limit: usize) -> MacoResult<MemoryListResponse> {
         let rows = memory_admin::list_from_pool(self.adk.memory_pool(), limit).await?;
         Ok(MemoryListResponse {
@@ -220,6 +231,7 @@ impl SessionFacade {
         })
     }
 
+    /// 向全局 memory 追加一条用户文本。
     pub async fn memory_add(&self, content: &str) -> MacoResult<()> {
         let entry = MemoryEntry {
             content: Content {
@@ -238,6 +250,7 @@ impl SessionFacade {
             .map_err(|e| MacoError::Adk(e.to_string()))
     }
 
+    /// 按关键词删除 memory 条目，返回删除数量。
     pub async fn memory_delete(&self, query: &str) -> MacoResult<u64> {
         self.adk
             .memory
@@ -246,6 +259,7 @@ impl SessionFacade {
             .map_err(|e| MacoError::Adk(e.to_string()))
     }
 
+    /// 关键词检索 memory（当前为 adk 内置 keyword 模式）。
     pub async fn memory_search(&self, query: &str) -> MacoResult<MemorySearchResponse> {
         let resp = self
             .adk

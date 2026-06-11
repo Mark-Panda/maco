@@ -1,9 +1,12 @@
+//! 后台定时任务 worker：每 30 秒扫描到期 job 并执行。
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use maco_db::JobRepo;
 use tracing::{info, warn};
 
+/// 启动后台轮询协程（进程生命周期内持续运行）。
 pub fn spawn_job_worker(jobs: JobRepo) {
     tokio::spawn(async move {
         let jobs = Arc::new(jobs);
@@ -16,6 +19,7 @@ pub fn spawn_job_worker(jobs: JobRepo) {
     });
 }
 
+/// 单次扫描：取出 `next_run_at <= now` 的 job 并依次执行。
 async fn tick(jobs: &JobRepo) -> maco_core::MacoResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
     let due = jobs.due_jobs(&now).await?;
@@ -30,12 +34,14 @@ async fn tick(jobs: &JobRepo) -> maco_core::MacoResult<()> {
     Ok(())
 }
 
+/// 供 HTTP「立即执行」调用的公开入口。
 pub async fn run_job_public(
     job: &maco_db::JobRecord,
 ) -> (String, Option<String>, Option<String>, Option<String>) {
     run_job(job).await
 }
 
+/// 按 `job_type` 分发执行逻辑，返回 (status, result, error, next_run_at)。
 async fn run_job(job: &maco_db::JobRecord) -> (String, Option<String>, Option<String>, Option<String>) {
     match job.job_type.as_str() {
         "ping" => (
@@ -66,6 +72,7 @@ async fn run_job(job: &maco_db::JobRecord) -> (String, Option<String>, Option<St
     }
 }
 
+/// 根据 schedule 字符串计算下次运行时间（`hourly` / `daily`）。
 fn schedule_next(schedule: &Option<String>) -> Option<String> {
     let schedule = schedule.as_deref()?;
     if schedule == "hourly" {

@@ -1,3 +1,5 @@
+//! maco 业务库（`maco.db`）连接池与各表 Repository。
+
 pub mod pool;
 pub mod repos;
 

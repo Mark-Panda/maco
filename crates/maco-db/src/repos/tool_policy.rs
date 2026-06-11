@@ -1,14 +1,23 @@
+//! `maco_tool_policies` 表：工具级 HITL 策略（allow / confirm / deny）。
+
 use maco_core::{MacoError, MacoResult};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+/// 工具 HITL 策略规则。
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct ToolPolicyRecord {
+    /// 规则 ID。
     pub id: String,
+    /// 工具名匹配模式（支持通配）。
     pub tool_pattern: String,
+    /// 来源类型（`builtin` / `mcp` 等）。
     pub source_type: String,
+    /// 动作：`allow` / `confirm` / `deny`。
     pub action: String,
+    /// 是否启用（SQLite 0/1）。
     pub enabled: i64,
+    /// 创建时间。
     pub created_at: String,
 }
 

@@ -1,3 +1,5 @@
+//! Axum Bearer 鉴权中间件与请求扩展 `AuthContext`。
+
 use axum::{
     extract::{Request, State},
     http::StatusCode,
@@ -11,11 +13,14 @@ use tracing::warn;
 
 use crate::AppState;
 
+/// 鉴权通过后注入请求的 scope 列表。
 #[derive(Clone, Debug)]
 pub struct AuthContext {
+    /// 当前 Token 拥有的 scope 列表（含 `*` 表示全部）。
     pub scopes: Vec<String>,
 }
 
+/// 校验 `Authorization: Bearer`，并按路由检查 scope。
 pub async fn auth_middleware(
     State(state): State<AppState>,
     mut req: Request,

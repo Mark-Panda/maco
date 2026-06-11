@@ -1,3 +1,5 @@
+//! `maco_callback_logs` 表：Agent 回调阶段追踪日志。
+
 use maco_core::{MacoError, MacoResult};
 use sqlx::SqlitePool;
 

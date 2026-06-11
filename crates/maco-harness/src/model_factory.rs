@@ -1,3 +1,5 @@
+//! 根据 `maco_models` 记录构造 adk OpenAI / Anthropic 客户端。
+
 use std::env;
 use std::sync::Arc;
 
@@ -5,6 +7,7 @@ use adk_rust::prelude::*;
 use maco_core::{api_key_from_config, MacoError, MacoResult};
 use maco_db::ModelRecord;
 
+/// 优先使用模型 `config.api_key`，否则回退到 `api_key_env` 环境变量。
 fn resolve_api_key(model: &ModelRecord) -> MacoResult<String> {
     if let Some(key) = api_key_from_config(&model.config) {
         return Ok(key);
@@ -23,6 +26,7 @@ fn resolve_api_key(model: &ModelRecord) -> MacoResult<String> {
     )))
 }
 
+/// 按 provider 构建 `Arc<dyn Llm>`，支持自定义 `base_url`（兼容 API 网关）。
 pub fn build_llm(model: &ModelRecord) -> MacoResult<Arc<dyn Llm>> {
     let api_key = resolve_api_key(model)?;
     match model.provider.as_str() {

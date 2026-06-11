@@ -1,16 +1,27 @@
+//! `maco_artifacts` 表：上传附件元数据（文件存磁盘）。
+
 use maco_core::{MacoError, MacoResult};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+/// 上传附件元数据（二进制存磁盘）。
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct ArtifactRecord {
+    /// 附件 ID。
     pub id: String,
+    /// 所属会话 ID。
     pub session_id: String,
+    /// 原始文件名。
     pub filename: String,
+    /// MIME 类型。
     pub mime_type: String,
+    /// 文件大小（字节）。
     pub size_bytes: i64,
+    /// 磁盘相对/绝对存储路径。
     pub storage_path: String,
+    /// 内容校验和（可选）。
     pub checksum: Option<String>,
+    /// 上传时间。
     pub created_at: String,
 }
 

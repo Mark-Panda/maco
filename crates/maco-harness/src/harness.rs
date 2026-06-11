@@ -25,18 +25,28 @@ use crate::orchestrator::RunOrchestrator;
 use crate::skills::SkillLoader;
 use crate::usage::UsageContext;
 
+/// Agent 编排入口：绑定存储、Run 状态机、回调日志与工具策略，驱动一次完整对话 Run。
 pub struct MacoHarness {
+    /// adk Session/Memory 存储。
     storage: Arc<AdkStorage>,
+    /// Run 状态机编排器。
     orchestrator: RunOrchestrator,
+    /// ReAct plan/todo 仓库。
     react: ReactRepo,
+    /// Agent 回调日志仓库。
     callback_logs: CallbackLogRepo,
+    /// 用量统计仓库。
     usage: UsageRepo,
+    /// Elicitation 持久化仓库。
     elicitation: ElicitationRepo,
+    /// Elicitation 内存等待通道。
     elicitation_broker: ElicitationBroker,
+    /// 启用的工具 HITL 策略列表。
     tool_policies: Vec<ToolPolicyRecord>,
 }
 
 impl MacoHarness {
+    /// 构造 Harness，注入各持久化与策略依赖。
     pub fn new(
         storage: Arc<AdkStorage>,
         orchestrator: RunOrchestrator,
@@ -58,10 +68,12 @@ impl MacoHarness {
         }
     }
 
+    /// 返回 MCP Elicitation 的等待/唤醒协调器。
     pub fn elicitation_broker(&self) -> &ElicitationBroker {
         &self.elicitation_broker
     }
 
+    /// 为指定 MCP 连接创建 Elicitation 处理器（挂到 MCP 客户端时使用）。
     pub fn create_elicitation_handler(
         &self,
         session_id: &str,
@@ -80,6 +92,7 @@ impl MacoHarness {
         })
     }
 
+    /// 用户提交 Elicitation 响应（accept/decline/cancel），唤醒挂起的 Run。
     pub async fn respond_elicitation(
         &self,
         elicitation_id: &str,
@@ -96,14 +109,17 @@ impl MacoHarness {
         .await
     }
 
+    /// 访问 Run 生命周期编排器。
     pub fn orchestrator(&self) -> &RunOrchestrator {
         &self.orchestrator
     }
 
+    /// 访问 adk Session/Memory 存储适配层。
     pub fn storage(&self) -> &AdkStorage {
         &self.storage
     }
 
+    /// 拼装系统指令：基础 ReAct 说明 + 已扫描的 Skill 摘要。
     fn build_instruction(&self) -> String {
         let mut instruction = String::from(
             "You are maco, a helpful personal assistant. \
@@ -119,6 +135,7 @@ impl MacoHarness {
         instruction
     }
 
+    /// 发起一次用户聊天 Run，返回 `run_id` 与 SSE 事件接收端。
     pub async fn run_chat(
         &self,
         session_id: &str,
@@ -129,6 +146,7 @@ impl MacoHarness {
             .await
     }
 
+    /// HITL 用户确认/拒绝后，基于 `resume_context` 开启子 Run 继续执行。
     pub async fn resume_run(
         &self,
         session_id: &str,
@@ -166,6 +184,7 @@ impl MacoHarness {
             .await
     }
 
+    /// 内部统一入口：组装 Agent/Runner，异步消费事件流并推送 SSE。
     async fn run_with_content(
         &self,
         session_id: &str,
@@ -308,11 +327,13 @@ impl MacoHarness {
         Ok((run_id, rx))
     }
 
+    /// 中断指定 session 上正在进行的 Runner 流式生成。
     pub fn interrupt(&self, session_id: &str, runner: &Runner) -> bool {
         runner.interrupt(session_id)
     }
 }
 
+/// 将用户纯文本包装为 adk `Content`。
 fn user_text_content(user_text: &str) -> Content {
     Content {
         role: "user".into(),
@@ -322,6 +343,7 @@ fn user_text_content(user_text: &str) -> Content {
     }
 }
 
+/// 按环境变量组装 Agent 输入/输出 PII 护栏。
 fn agent_guardrails() -> GuardrailSet {
     let mut set = GuardrailSet::new();
     if pii_guardrail_enabled() {
@@ -330,6 +352,7 @@ fn agent_guardrails() -> GuardrailSet {
     set
 }
 
+/// 从 adk 事件中抽取可展示的纯文本片段。
 fn extract_event_text(event: &Event) -> String {
     event
         .llm_response

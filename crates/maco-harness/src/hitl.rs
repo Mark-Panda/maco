@@ -1,3 +1,5 @@
+//! Human-in-the-loop：危险工具执行前暂停 Run，等待用户确认。
+
 use adk_core::{Content, FunctionResponseData, Part};
 use adk_core::Result as AdkResult;
 use maco_core::{ResumeContext, SseEnvelope, RUN_STATUS_AWAITING_USER};
@@ -7,15 +9,22 @@ use tokio::sync::mpsc;
 
 use crate::orchestrator::RunOrchestrator;
 
+/// 工具执行前的策略闸门，命中 `confirm` 时挂起 Run 并推送 SSE 确认事件。
 pub struct HitlGate {
+    /// 当前 Run ID。
     pub run_id: String,
+    /// 当前会话 ID。
     pub session_id: String,
+    /// Run 状态编排器。
     pub orchestrator: RunOrchestrator,
+    /// 启用的工具策略规则。
     pub policies: Vec<ToolPolicyRecord>,
+    /// SSE 推送通道（通知前端待审批工具）。
     pub sse_tx: Option<mpsc::Sender<SseEnvelope>>,
 }
 
 impl HitlGate {
+    /// 根据 `maco_tool_policies` 判定 allow/deny/confirm；confirm 时返回占位响应并暂停 Run。
     pub async fn check_before_tool(
         &self,
         source_type: &str,
@@ -70,6 +79,7 @@ impl HitlGate {
     }
 }
 
+/// 构造工具被拒绝时的 FunctionResponse 内容。
 fn denied_content(tool_name: &str, call_id: &str, message: &str) -> Content {
     Content {
         role: "user".into(),
@@ -83,6 +93,7 @@ fn denied_content(tool_name: &str, call_id: &str, message: &str) -> Content {
     }
 }
 
+/// 构造等待用户确认时的占位 FunctionResponse。
 fn pending_content(tool_name: &str, call_id: &str) -> Content {
     Content {
         role: "user".into(),
@@ -99,6 +110,7 @@ fn pending_content(tool_name: &str, call_id: &str) -> Content {
     }
 }
 
+/// 将用户对工具确认的裁决编码为可续跑的 `Content`。
 pub fn build_resume_content(
     tool_name: &str,
     call_id: &str,

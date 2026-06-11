@@ -1,27 +1,47 @@
+//! `maco_usage_stats` 表：按 Run 汇总的 token 用量与估算费用。
+
 use maco_core::{MacoError, MacoResult};
 use sqlx::SqlitePool;
 
+/// 单次 LLM 调用的用量明细行。
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct UsageRow {
+    /// 自增 ID。
     pub id: i64,
+    /// 会话 ID。
     pub session_id: Option<String>,
+    /// Run ID。
     pub run_id: Option<String>,
+    /// 模型配置 ID。
     pub model_id: Option<String>,
+    /// 模型显示名。
     pub model_name: String,
+    /// 输入 token 数。
     pub prompt_tokens: i64,
+    /// 输出 token 数。
     pub completion_tokens: i64,
+    /// 总 token 数。
     pub total_tokens: i64,
+    /// 估算费用（美元）。
     pub estimated_cost: Option<f64>,
+    /// 记录时间。
     pub created_at: String,
 }
 
+/// 用量汇总项（按 model/day/session 聚合）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct UsageSummaryItem {
+    /// 聚合键（模型 ID、日期或 session ID）。
     pub key: String,
+    /// 输入 token 合计。
     pub prompt_tokens: i64,
+    /// 输出 token 合计。
     pub completion_tokens: i64,
+    /// 总 token 合计。
     pub total_tokens: i64,
+    /// 估算费用合计。
     pub estimated_cost: f64,
+    /// 请求次数。
     pub request_count: i64,
 }
 

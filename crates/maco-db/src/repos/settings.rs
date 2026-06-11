@@ -1,3 +1,5 @@
+//! `maco_settings` 键值表：全局配置与种子数据。
+
 use maco_core::{MacoError, MacoResult};
 use sqlx::SqlitePool;
 

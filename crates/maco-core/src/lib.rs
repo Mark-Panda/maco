@@ -1,3 +1,5 @@
+//! maco 核心类型：配置路径、错误、Run/SSE 契约、模型密钥脱敏。
+
 pub mod config;
 pub mod error;
 pub mod model_config;

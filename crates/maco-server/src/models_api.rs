@@ -1,3 +1,5 @@
+//! 模型 API 的 DTO 转换：内联 api_key 合并与列表脱敏。
+
 use chrono::Utc;
 use maco_core::{
     api_key_preview, has_stored_api_key, merge_api_key, redact_config_for_api, MacoError, MacoResult,
@@ -5,38 +7,62 @@ use maco_core::{
 use maco_db::{ModelRecord, ModelRepo};
 use serde::{Deserialize, Serialize};
 
+/// 对外模型视图（不含明文 api_key，仅 preview）。
 #[derive(Debug, Serialize)]
 pub struct ModelView {
+    /// 模型配置 ID。
     pub id: String,
+    /// 显示名称。
     pub name: String,
+    /// 提供商：`openai` 或 `anthropic`。
     pub provider: String,
+    /// 上游模型标识（如 `gpt-4o`、`claude-sonnet-4-20250514`）。
     pub model_id: String,
+    /// 自定义 API Base URL（OpenAI 兼容或 Anthropic 代理）。
     pub base_url: Option<String>,
+    /// 环境变量名，用于从进程环境读取 API Key 兜底。
     pub api_key_env: String,
+    /// 是否为默认模型。
     pub is_default: bool,
+    /// 是否启用。
     pub enabled: bool,
+    /// JSON 扩展配置（api_key 已脱敏）。
     pub config: String,
+    /// 是否已配置内联 api_key 或非空 api_key_env。
     pub has_api_key: bool,
+    /// api_key 尾号预览（如 `...abcd`）。
     pub api_key_preview: Option<String>,
+    /// 创建时间。
     pub created_at: String,
+    /// 最后更新时间。
     pub updated_at: String,
 }
 
+/// `POST/PATCH /models` 请求体。
 #[derive(Debug, Deserialize)]
 pub struct ModelUpsertBody {
+    /// 显示名称。
     pub name: String,
+    /// 提供商：`openai` 或 `anthropic`。
     pub provider: String,
+    /// 上游模型标识。
     pub model_id: String,
+    /// 自定义 API Base URL。
     #[serde(default)]
     pub base_url: Option<String>,
+    /// 环境变量名（读取 API Key 兜底）。
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// 内联 API Key；传空字符串表示清除已存储的 key。
     #[serde(default)]
     pub api_key: Option<String>,
+    /// 是否设为默认模型。
     #[serde(default)]
     pub is_default: bool,
+    /// 是否启用，默认 `true`。
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// 额外 JSON 配置（与 api_key 合并写入 config 列）。
     #[serde(default)]
     pub config: Option<String>,
 }

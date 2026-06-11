@@ -1,27 +1,46 @@
+//! `maco_api_tokens` 表：Bearer Token 哈希与 scope。
+
 use maco_core::{MacoError, MacoResult};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+/// API Token 数据库记录（仅存哈希）。
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct ApiTokenRecord {
+    /// Token ID。
     pub id: String,
+    /// 显示名称。
     pub name: String,
+    /// SHA-256 哈希（十六进制）。
     pub token_hash: String,
+    /// scope JSON 数组字符串。
     pub scopes: String,
+    /// 过期时间（可选）。
     pub expires_at: Option<String>,
+    /// 最后使用时间。
     pub last_used_at: Option<String>,
+    /// 是否启用（SQLite 0/1）。
     pub enabled: i64,
+    /// 创建时间。
     pub created_at: String,
 }
 
+/// Token 列表项（不含哈希与明文）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ApiTokenListItem {
+    /// Token ID。
     pub id: String,
+    /// 显示名称。
     pub name: String,
+    /// 授权 scope 列表。
     pub scopes: Vec<String>,
+    /// 过期时间。
     pub expires_at: Option<String>,
+    /// 最后使用时间。
     pub last_used_at: Option<String>,
+    /// 是否启用。
     pub enabled: bool,
+    /// 创建时间。
     pub created_at: String,
 }
 

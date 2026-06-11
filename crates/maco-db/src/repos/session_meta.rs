@@ -1,15 +1,25 @@
+//! `maco_session_meta` 表：会话标题、模型绑定与生命周期状态。
+
 use chrono::Utc;
 use maco_core::{MacoError, MacoResult};
 use sqlx::SqlitePool;
 
+/// 业务侧会话元数据（与 adk session_id 一一对应）。
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct SessionMetaRecord {
+    /// 会话 ID（与 adk 一致）。
     pub session_id: String,
+    /// 显示标题。
     pub title: Option<String>,
+    /// 绑定模型 ID。
     pub model_id: Option<String>,
+    /// 所属项目 ID（预留）。
     pub project_id: Option<String>,
+    /// 生命周期状态。
     pub status: String,
+    /// 创建时间。
     pub created_at: String,
+    /// 最后活动时间。
     pub updated_at: String,
 }
 

@@ -1,9 +1,12 @@
+//! 将会话事件、Plan、Todo 导出为 Markdown。
+
 use adk_core::{Content, Part};
 use adk_session::GetRequest;
 use maco_core::{MacoError, MacoResult, APP_NAME, USER_ID};
 use maco_db::{PlanRecord, SessionMetaRecord, TodoRecord};
 use maco_storage::AdkStorage;
 
+/// 组装完整会话 Markdown 文档（元数据 + plan/todos + 事件时间线）。
 pub async fn session_markdown(
     adk: &AdkStorage,
     meta: Option<&SessionMetaRecord>,

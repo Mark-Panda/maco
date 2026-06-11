@@ -1,19 +1,33 @@
+//! `maco_elicitations` 表：MCP 人机确认请求与响应。
+
 use maco_core::{MacoError, MacoResult};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+/// MCP Elicitation 持久化记录。
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct ElicitationRecord {
+    /// 记录 ID。
     pub id: String,
+    /// 所属会话 ID。
     pub session_id: String,
+    /// 触发时的 Run ID。
     pub run_id: String,
+    /// MCP 服务名称。
     pub mcp_server: String,
+    /// 请求类型：`form` / `url`。
     pub request_type: String,
+    /// 请求载荷 JSON 字符串。
     pub payload: String,
+    /// 用户响应 JSON 字符串。
     pub response: Option<String>,
+    /// 状态：`pending` / `submitted` / `cancelled` / `expired`。
     pub status: String,
+    /// 过期时间。
     pub expires_at: String,
+    /// 创建时间。
     pub created_at: String,
+    /// 用户响应时间。
     pub responded_at: Option<String>,
 }
 

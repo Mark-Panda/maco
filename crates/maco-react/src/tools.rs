@@ -1,3 +1,5 @@
+//! ReAct Agent 工具：`update_plan` / `upsert_todo` 写入 SQLite。
+
 use std::sync::Arc;
 
 use adk_core::{Result as AdkResult, Tool, ToolContext};
@@ -5,7 +7,9 @@ use async_trait::async_trait;
 use maco_db::ReactRepo;
 use serde_json::{json, Value};
 
+/// 将 `ReactRepo` 暴露为 adk `Tool` 列表。
 pub struct ReactTools {
+    /// 底层 ReAct 数据仓库。
     pub repo: ReactRepo,
 }
 
@@ -14,6 +18,7 @@ impl ReactTools {
         Self { repo }
     }
 
+    /// 返回可挂到 `LlmAgentBuilder` 的工具集合。
     pub fn as_tool_arcs(&self) -> Vec<Arc<dyn Tool>> {
         vec![
             Arc::new(UpdatePlanTool {
@@ -26,7 +31,9 @@ impl ReactTools {
     }
 }
 
+/// Agent 工具：更新会话任务计划。
 struct UpdatePlanTool {
+    /// ReAct 仓库。
     repo: ReactRepo,
 }
 
@@ -75,7 +82,9 @@ impl Tool for UpdatePlanTool {
     }
 }
 
+/// Agent 工具：创建或更新待办项。
 struct UpsertTodoTool {
+    /// ReAct 仓库。
     repo: ReactRepo,
 }
 

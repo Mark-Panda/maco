@@ -1,3 +1,5 @@
+//! MCP Elicitation 人机交互：持久化请求、SSE 推送、等待用户响应后恢复 Run。
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,8 +15,10 @@ use tokio::sync::{mpsc, Mutex, oneshot};
 
 use crate::orchestrator::RunOrchestrator;
 
+/// 默认等待用户响应的超时时间（30 分钟）。
 const DEFAULT_ELICITATION_TTL_SECS: u64 = 30 * 60;
 
+/// 内存中的 elicitation 完成通道注册表（`elicitation_id` → oneshot）。
 #[derive(Clone)]
 pub struct ElicitationBroker {
     inner: Arc<Mutex<HashMap<String, oneshot::Sender<CreateElicitationResult>>>>,
@@ -27,12 +31,14 @@ impl ElicitationBroker {
         }
     }
 
+    /// 为新的 elicitation 注册等待通道，返回接收端。
     pub async fn register(&self, id: String) -> oneshot::Receiver<CreateElicitationResult> {
         let (tx, rx) = oneshot::channel();
         self.inner.lock().await.insert(id, tx);
         rx
     }
 
+    /// 用户提交响应后唤醒等待中的 handler；成功返回 `true`。
     pub async fn fulfill(&self, id: &str, result: CreateElicitationResult) -> bool {
         let tx = self.inner.lock().await.remove(id);
         if let Some(tx) = tx {
@@ -42,6 +48,7 @@ impl ElicitationBroker {
         }
     }
 
+    /// 取消等待（如 Run 被中断时清理注册）。
     pub async fn cancel(&self, id: &str) {
         self.inner.lock().await.remove(id);
     }
@@ -53,17 +60,26 @@ impl Default for ElicitationBroker {
     }
 }
 
+/// adk `ElicitationHandler` 实现：落库、切 Run 为 `awaiting_user`、经 SSE 通知前端。
 pub struct MacoElicitationHandler {
+    /// 当前会话 ID。
     pub session_id: String,
+    /// 当前 Run ID。
     pub run_id: String,
+    /// 发起 Elicitation 的 MCP 服务名。
     pub mcp_server: String,
+    /// Run 状态编排器。
     pub orchestrator: RunOrchestrator,
+    /// Elicitation 持久化仓库。
     pub repo: ElicitationRepo,
+    /// 等待用户响应的内存 broker。
     pub broker: ElicitationBroker,
+    /// SSE 事件发送通道（推送给前端）。
     pub sse_tx: Option<mpsc::Sender<SseEnvelope>>,
 }
 
 impl MacoElicitationHandler {
+    /// 通用等待流程：写 DB → 暂停 Run → 推 SSE → 阻塞至用户响应或超时。
     async fn wait_for_user(
         &self,
         request_type: &str,
@@ -180,13 +196,17 @@ impl ElicitationHandler for MacoElicitationHandler {
     }
 }
 
+/// HTTP `POST /elicitation/:id/respond` 请求体。
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ElicitationRespondBody {
+    /// 用户操作：`accept` / `decline` / `cancel`。
     pub action: String,
+    /// 用户填写内容（form elicitation 的 accept 时附带）。
     #[serde(default)]
     pub content: Option<Value>,
 }
 
+/// 将前端 action 字符串映射为 MCP `ElicitationAction`。
 pub fn action_from_str(s: &str) -> Option<ElicitationAction> {
     match s.to_ascii_lowercase().as_str() {
         "accept" => Some(ElicitationAction::Accept),
@@ -196,6 +216,7 @@ pub fn action_from_str(s: &str) -> Option<ElicitationAction> {
     }
 }
 
+/// 组装 MCP 侧 elicitation 结果（可选附带用户填写内容）。
 pub fn build_elicitation_result(
     action: ElicitationAction,
     content: Option<Value>,
@@ -207,6 +228,7 @@ pub fn build_elicitation_result(
     result
 }
 
+/// API 层响应 elicitation：校验状态、写 DB、通过 broker 唤醒等待中的 Run。
 pub async fn respond_to_elicitation(
     repo: &ElicitationRepo,
     broker: &ElicitationBroker,

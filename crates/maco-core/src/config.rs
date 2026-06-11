@@ -1,23 +1,34 @@
+//! 应用配置与数据目录路径（`~/.maco/config.toml` + `~/.maco/data/`）。
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{MacoError, MacoResult};
 
+/// adk 应用名（写入 sessions.db）。
 pub const APP_NAME: &str = "maco";
+/// 本机单用户模式下的固定 user_id。
 pub const USER_ID: &str = "local";
 
+/// 顶层配置，当前仅包含数据路径。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// 数据文件路径配置。
     #[serde(default)]
     pub data: DataPaths,
 }
 
+/// 四类持久化路径：业务库、adk session、adk memory、artifact 目录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataPaths {
+    /// 业务库 `maco.db` 路径。
     pub maco_db: PathBuf,
+    /// adk 会话库 `sessions.db` 路径。
     pub sessions_db: PathBuf,
+    /// adk 记忆库 `memory.db` 路径。
     pub memory_db: PathBuf,
+    /// 上传附件根目录。
     pub artifacts_dir: PathBuf,
 }
 
@@ -39,6 +50,7 @@ impl Default for AppConfig {
     }
 }
 
+/// 默认数据根目录 `~/.maco/data`。
 pub fn default_data_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -46,6 +58,7 @@ pub fn default_data_dir() -> PathBuf {
         .join("data")
 }
 
+/// 默认 Skill 扫描目录 `~/.maco/skills`。
 pub fn default_skills_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -53,6 +66,7 @@ pub fn default_skills_dir() -> PathBuf {
         .join("skills")
 }
 
+/// 读取 `~/.maco/config.toml`；不存在则返回默认配置。
 pub fn load_config() -> MacoResult<AppConfig> {
     let path = config_file_path();
     if !path.exists() {
@@ -91,6 +105,7 @@ fn expand_tilde(path: PathBuf) -> PathBuf {
     path
 }
 
+/// 确保数据目录与 artifacts 子目录存在。
 pub fn ensure_data_dirs(paths: &DataPaths) -> MacoResult<()> {
     let parent = paths
         .maco_db
@@ -103,11 +118,12 @@ pub fn ensure_data_dirs(paths: &DataPaths) -> MacoResult<()> {
     Ok(())
 }
 
+/// sqlx 业务库连接 URL（`maco.db`）。
 pub fn sqlite_url(path: &Path) -> String {
     format!("sqlite://{}", path.display())
 }
 
-/// adk-session uses sqlx connect; absolute paths need `sqlite:///` prefix.
+/// adk-session 用 SQLite URL；绝对路径需 `sqlite:///` 前缀。
 pub fn adk_session_url(path: &Path) -> String {
     if path.is_absolute() {
         format!("sqlite:///{}?mode=rwc", path.display())
@@ -116,7 +132,7 @@ pub fn adk_session_url(path: &Path) -> String {
     }
 }
 
-/// adk-memory uses SqliteConnectOptions::from_str with create_if_missing.
+/// adk-memory 用 SQLite URL（`SqliteConnectOptions::from_str`）。
 pub fn adk_memory_url(path: &Path) -> String {
     if path.is_absolute() {
         format!("sqlite:///{}", path.display())
@@ -125,6 +141,7 @@ pub fn adk_memory_url(path: &Path) -> String {
     }
 }
 
+/// `maco-db` 迁移与连接使用的 URL。
 pub fn maco_db_url(path: &Path) -> String {
     format!("sqlite://{}?mode=rwc", path.display())
 }

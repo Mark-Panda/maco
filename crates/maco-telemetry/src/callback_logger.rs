@@ -1,8 +1,11 @@
+//! 将 adk Agent 各阶段回调写入 `maco_callback_logs`。
+
 use std::sync::Arc;
 
 use maco_db::CallbackLogRepo;
 use uuid::Uuid;
 
+/// 绑定 session/run 的回调日志记录器。
 pub struct MacoCallbackLogger {
     repo: CallbackLogRepo,
     session_id: String,

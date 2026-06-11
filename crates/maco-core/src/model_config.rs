@@ -1,9 +1,12 @@
+//! 模型 `config` JSON 字段解析：内联 API Key 的合并与 API 脱敏。
+
 use serde_json::{json, Value};
 
 use crate::error::{MacoError, MacoResult};
 
 const API_KEY_FIELD: &str = "api_key";
 
+/// 从模型 `config` JSON 中读取内联 API Key。
 pub fn api_key_from_config(config: &str) -> Option<String> {
     let cfg: Value = serde_json::from_str(config).ok()?;
     cfg.get(API_KEY_FIELD)
@@ -12,10 +15,12 @@ pub fn api_key_from_config(config: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// 是否已在 `config` 中配置内联 API Key。
 pub fn has_stored_api_key(config: &str) -> bool {
     api_key_from_config(config).is_some()
 }
 
+/// 返回供 API 展示的 config（移除 `api_key` 字段）。
 pub fn redact_config_for_api(config: &str) -> String {
     let Ok(mut cfg) = serde_json::from_str::<Value>(config) else {
         return "{}".into();
@@ -35,6 +40,7 @@ fn obj_or_empty(v: &Value) -> Value {
     }
 }
 
+/// 合并或清除 `config` 中的 `api_key`；`None` 表示不修改已有密钥。
 pub fn merge_api_key(config: &str, api_key: Option<&str>) -> MacoResult<String> {
     let mut cfg: Value = if config.trim().is_empty() {
         json!({})
@@ -57,6 +63,7 @@ pub fn merge_api_key(config: &str, api_key: Option<&str>) -> MacoResult<String> 
     serde_json::to_string(&cfg).map_err(|e| MacoError::config(e.to_string()))
 }
 
+/// 生成 API 列表用的密钥预览（首尾各 4 字符）。
 pub fn api_key_preview(config: &str) -> Option<String> {
     let key = api_key_from_config(config)?;
     if key.len() <= 8 {

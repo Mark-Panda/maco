@@ -1,22 +1,37 @@
+//! `maco_models` 表：LLM 提供商配置与默认模型。
+
 use maco_core::{MacoError, MacoResult};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+/// 一条模型配置（`config` 为 JSON，可含内联 `api_key`）。
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
 pub struct ModelRecord {
+    /// 配置 ID。
     pub id: String,
+    /// 显示名称。
     pub name: String,
+    /// 提供商：`openai` / `anthropic`。
     pub provider: String,
+    /// 上游模型标识。
     pub model_id: String,
+    /// 自定义 API Base URL。
     pub base_url: Option<String>,
+    /// 环境变量名（API Key 兜底）。
     pub api_key_env: String,
+    /// 是否默认（SQLite 0/1）。
     pub is_default: i64,
+    /// 是否启用（SQLite 0/1）。
     pub enabled: i64,
+    /// JSON 扩展配置（可含内联 api_key、单价等）。
     pub config: String,
+    /// 创建时间。
     pub created_at: String,
+    /// 最后更新时间。
     pub updated_at: String,
 }
 
+/// 模型 CRUD 与默认模型管理。
 #[derive(Clone)]
 pub struct ModelRepo {
     pool: SqlitePool,

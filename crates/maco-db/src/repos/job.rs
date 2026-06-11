@@ -1,24 +1,41 @@
+//! `maco_jobs` 表：可调度后台任务（ping / log 等）。
+
 use maco_core::{MacoError, MacoResult};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+/// 定时或手动触发的后台任务记录。
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct JobRecord {
+    /// 任务 ID。
     pub id: String,
+    /// 显示名称。
     pub name: String,
+    /// 任务类型（`ping` / `log` 等）。
     pub job_type: String,
+    /// 调度周期（`hourly` / `daily`，可选）。
     pub schedule: Option<String>,
+    /// JSON 载荷字符串。
     pub payload: String,
+    /// 最近执行状态。
     pub status: String,
+    /// 上次执行时间。
     pub last_run_at: Option<String>,
+    /// 下次计划执行时间。
     pub next_run_at: Option<String>,
+    /// 上次执行结果文本。
     pub result: Option<String>,
+    /// 上次执行错误信息。
     pub error_message: Option<String>,
+    /// 是否启用（SQLite 0/1）。
     pub enabled: i64,
+    /// 创建时间。
     pub created_at: String,
+    /// 最后更新时间。
     pub updated_at: String,
 }
 
+/// Job 持久化与到期扫描。
 #[derive(Clone)]
 pub struct JobRepo {
     pool: SqlitePool,

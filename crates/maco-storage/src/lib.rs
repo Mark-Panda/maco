@@ -1,3 +1,5 @@
+//! adk Session/Memory SQLite 适配与 artifact 文件存储。
+
 pub mod artifacts;
 pub mod memory_admin;
 
@@ -12,14 +14,20 @@ use std::str::FromStr;
 
 pub use artifacts::ArtifactStore;
 
+/// 封装 adk `SessionService` 与 `MemoryService` 的打开与共享句柄。
 pub struct AdkStorage {
+    /// adk 会话服务（读写 events/state）。
     pub session: Arc<dyn SessionService>,
+    /// adk 记忆服务（增删查）。
     pub memory: Arc<dyn MemoryService>,
+    /// Agent 侧 Memory trait 适配器。
     pub memory_adapter: Arc<dyn adk_core::Memory>,
+    /// memory.db 连接池（管理 API 直查用）。
     memory_pool: SqlitePool,
 }
 
 impl AdkStorage {
+    /// 打开/迁移 sessions.db 与 memory.db，并构建 adk 服务实例。
     pub async fn open(paths: &DataPaths) -> MacoResult<Self> {
         let session_url = adk_session_url(&paths.sessions_db);
         let memory_url = adk_memory_url(&paths.memory_db);

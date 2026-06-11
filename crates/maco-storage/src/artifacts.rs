@@ -1,3 +1,5 @@
+//! 会话附件：磁盘存储 + `maco_artifacts` 元数据。
+
 use std::path::{Path, PathBuf};
 
 use maco_core::{MacoError, MacoResult};
@@ -6,6 +8,7 @@ use maco_governance::validate_artifact;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+/// 按 `session_id/artifact_id` 组织文件，并与 DB 记录同步。
 pub struct ArtifactStore {
     base_dir: PathBuf,
     repo: ArtifactRepo,

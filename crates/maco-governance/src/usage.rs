@@ -1,8 +1,13 @@
+//! LLM 用量费用估算（基于模型 config 中的单价配置）。
+
 use maco_db::ModelRecord;
 
+/// 模型单价配置（从 `config` JSON 解析）。
 #[derive(Debug, Clone, Default)]
 pub struct ModelPricing {
+    /// 每 1K 输入 token 价格（美元）。
     pub price_per_1k_prompt: f64,
+    /// 每 1K 输出 token 价格（美元）。
     pub price_per_1k_completion: f64,
 }
 

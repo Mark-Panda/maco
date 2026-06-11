@@ -1,20 +1,33 @@
+//! `maco_runs` 表：Run 状态机、resume 上下文与 SSE 序号。
+
 use maco_core::{MacoError, MacoResult, RUN_STATUS_RUNNING};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+/// 单次 Agent 执行记录（与 session 一对多）。
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct RunRecord {
+    /// Run 唯一 ID。
     pub id: String,
+    /// 所属会话 ID。
     pub session_id: String,
+    /// 状态（`pending` / `running` / `awaiting_user` 等）。
     pub status: String,
+    /// 暂停恢复上下文 JSON（HITL/Elicitation）。
     pub resume_context: Option<String>,
+    /// 被取代的新 Run ID（resume 链路）。
     pub superseded_by: Option<String>,
+    /// 失败错误信息。
     pub error_message: Option<String>,
+    /// 最后 SSE 事件序号。
     pub last_seq: i64,
+    /// 创建时间。
     pub created_at: String,
+    /// 最后更新时间。
     pub updated_at: String,
 }
 
+/// Run 持久化访问层。
 #[derive(Clone)]
 pub struct RunRepo {
     pool: SqlitePool,
@@ -25,6 +38,7 @@ impl RunRepo {
         Self { pool }
     }
 
+    /// 创建新 Run 并初始化 `last_seq = 0`。
     pub async fn create(&self, session_id: &str, status: &str) -> MacoResult<RunRecord> {
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
@@ -53,6 +67,7 @@ impl RunRepo {
         })
     }
 
+    /// 按 ID 查询 Run。
     pub async fn get(&self, run_id: &str) -> MacoResult<Option<RunRecord>> {
         sqlx::query_as::<_, RunRecord>(
             "SELECT id, session_id, status, resume_context, superseded_by, error_message, last_seq, created_at, updated_at
@@ -64,6 +79,7 @@ impl RunRepo {
         .map_err(|e| MacoError::database(e.to_string()))
     }
 
+    /// 更新 Run 状态与可选错误信息。
     pub async fn update_status(
         &self,
         run_id: &str,
@@ -84,6 +100,7 @@ impl RunRepo {
         Ok(())
     }
 
+    /// 进入 `awaiting_user` 并写入 resume JSON。
     pub async fn set_awaiting_user(&self, run_id: &str, resume_context: &str) -> MacoResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
@@ -98,6 +115,7 @@ impl RunRepo {
         Ok(())
     }
 
+    /// 标记旧 Run 已被新 Run 取代（resume 链路）。
     pub async fn set_superseded_by(&self, run_id: &str, new_run_id: &str) -> MacoResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
@@ -112,6 +130,7 @@ impl RunRepo {
         Ok(())
     }
 
+    /// 递增 SSE 事件序号并返回新值。
     pub async fn bump_seq(&self, run_id: &str) -> MacoResult<u64> {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
@@ -130,6 +149,7 @@ impl RunRepo {
         Ok(row.0 as u64)
     }
 
+    /// 恢复执行后清空 resume 上下文。
     pub async fn clear_resume_context(&self, run_id: &str) -> MacoResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
@@ -143,6 +163,7 @@ impl RunRepo {
         Ok(())
     }
 
+    /// 会话是否已有 `running` 状态的 Run（防并发聊天）。
     pub async fn has_running(&self, session_id: &str) -> MacoResult<bool> {
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM maco_runs WHERE session_id = ? AND status = ?",

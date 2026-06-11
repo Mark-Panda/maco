@@ -1,3 +1,5 @@
+//! HTTP API 路由与 handler 实现。
+
 use axum::{
     extract::{Extension, Multipart, Path, State},
     http::{header, StatusCode},
@@ -21,10 +23,13 @@ use crate::export::session_markdown;
 use crate::models_api::{list_views, upsert_from_body, ModelUpsertBody, ModelView};
 use crate::AppState;
 
+/// 挂载于 `/api` 下的全部 REST 与 SSE 端点。
 pub fn api_router() -> Router<AppState> {
     Router::new()
+        // 健康检查与治理状态
         .route("/health", get(health))
         .route("/guardrail/status", get(guardrail_status))
+        // 会话 CRUD 与 ReAct plan/todo
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", patch(update_session).delete(delete_session))
         .route("/sessions/{id}/plan", get(get_plan).put(put_plan))
@@ -32,25 +37,34 @@ pub fn api_router() -> Router<AppState> {
         .route("/sessions/{id}/todos/{task_key}", patch(patch_todo))
         .route("/sessions/{id}/artifacts", post(upload_artifact))
         .route("/sessions/{id}/export", get(export_session))
+        // Run 状态查询、HITL/Elicitation 恢复
         .route("/sessions/{id}/runs/{run_id}", get(get_run))
         .route("/sessions/{id}/runs/{run_id}/resume", post(resume_run))
         .route("/sessions/{id}/elicitation/pending", get(list_pending_elicitation))
         .route("/elicitation/{id}/respond", post(respond_elicitation))
+        // 模型配置
         .route("/models", get(list_models).post(create_model))
         .route("/models/{id}", patch(update_model).delete(delete_model))
+        // 聊天 SSE 与中断
         .route("/chat", post(chat_sse))
         .route("/chat/{session_id}/interrupt", post(interrupt_chat))
+        // 全局 Memory
         .route("/memory", get(list_memory).post(add_memory).delete(delete_memory))
         .route("/memory/search", get(memory_search))
+        // Skill 扫描
         .route("/skills", get(list_skills))
+        // API Token 管理
         .route("/auth/tokens", get(list_tokens).post(create_token))
         .route("/auth/tokens/{id}", delete(revoke_token))
+        // 用量统计
         .route("/usage/summary", get(usage_summary))
+        // 后台定时任务
         .route("/jobs", get(list_jobs).post(create_job))
         .route("/jobs/{id}", patch(update_job).delete(delete_job))
         .route("/jobs/{id}/run", post(run_job_now))
 }
 
+/// `GET /guardrail/status` — 返回 PII 脱敏与日志脱敏配置状态。
 async fn guardrail_status() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "pii_enabled": pii_guardrail_enabled(),
@@ -58,6 +72,7 @@ async fn guardrail_status() -> Json<serde_json::Value> {
     }))
 }
 
+/// `GET /health` — 探活：数据库、MCP 池、Memory、Skill 数量与绑定地址。
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let _guard = state.mcp_pool.acquire("health-check").await;
     Json(serde_json::json!({
@@ -69,16 +84,21 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
+/// `GET /sessions` — 列出所有会话元数据（与 adk session 对齐）。
 async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<maco_db::SessionMetaRecord>>, ApiError> {
     Ok(Json(state.facade.list_sessions().await?))
 }
 
+/// `POST /sessions` 请求体。
 #[derive(Deserialize)]
 struct CreateSessionBody {
+    /// 会话显示标题。
     title: Option<String>,
+    /// 初始绑定模型 ID（写入 adk state `user:model`）。
     model_id: Option<String>,
 }
 
+/// `POST /sessions` — 创建新会话。
 async fn create_session(
     State(state): State<AppState>,
     Json(body): Json<CreateSessionBody>,
@@ -91,12 +111,16 @@ async fn create_session(
     ))
 }
 
+/// `PATCH /sessions/{id}` 请求体。
 #[derive(Deserialize)]
 struct UpdateSessionBody {
+    /// 新标题（可选）。
     title: Option<String>,
+    /// 新模型 ID（可选，会同步 adk state）。
     model_id: Option<String>,
 }
 
+/// `PATCH /sessions/{id}` — 更新会话标题或绑定模型。
 async fn update_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -114,6 +138,7 @@ async fn update_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `DELETE /sessions/{id}` — 删除会话（含 adk session 与 memory 清理）。
 async fn delete_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -122,10 +147,12 @@ async fn delete_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `GET /models` — 列出模型配置（api_key 已脱敏）。
 async fn list_models(State(state): State<AppState>) -> Result<Json<Vec<ModelView>>, ApiError> {
     Ok(Json(list_views(&state.models).await?))
 }
 
+/// `POST /models` — 新建模型配置。
 async fn create_model(
     State(state): State<AppState>,
     Json(body): Json<ModelUpsertBody>,
@@ -133,6 +160,7 @@ async fn create_model(
     Ok(Json(upsert_from_body(&state.models, None, body).await?))
 }
 
+/// `PATCH /models/{id}` — 更新指定模型。
 async fn update_model(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -141,6 +169,7 @@ async fn update_model(
     Ok(Json(upsert_from_body(&state.models, Some(&id), body).await?))
 }
 
+/// `DELETE /models/{id}` — 删除模型配置。
 async fn delete_model(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -149,13 +178,18 @@ async fn delete_model(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /chat` 请求体。
 #[derive(Deserialize)]
 struct ChatBody {
+    /// 目标会话 ID。
     session_id: String,
+    /// 用户输入消息文本。
     message: String,
+    /// 本次请求覆盖的模型 ID（优先于会话绑定）。
     model_id: Option<String>,
 }
 
+/// `POST /chat` — 发起 Agent Run，以 SSE 流式返回事件。
 async fn chat_sse(
     State(state): State<AppState>,
     Json(body): Json<ChatBody>,
@@ -186,12 +220,14 @@ async fn chat_sse(
     ))
 }
 
+/// `POST /chat/{session_id}/interrupt` — 中断当前会话聊天（占位实现）。
 async fn interrupt_chat(
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(serde_json::json!({ "session_id": session_id, "interrupted": true })))
 }
 
+/// `GET /sessions/{id}/runs/{run_id}` — 查询 Run 状态与挂起的工具/Elicitation。
 async fn get_run(
     State(state): State<AppState>,
     Path((session_id, run_id)): Path<(String, String)>,
@@ -217,6 +253,7 @@ async fn get_run(
     }))
 }
 
+/// 从 DB 加载会话下所有 pending 状态的 Elicitation 摘要。
 async fn load_pending_elicitations(
     state: &AppState,
     session_id: &str,
@@ -228,6 +265,7 @@ async fn load_pending_elicitations(
     Ok(records.iter().map(payload_summary).collect())
 }
 
+/// `GET /sessions/{id}/elicitation/pending` — 列出会话待处理的 Elicitation。
 async fn list_pending_elicitation(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -235,6 +273,7 @@ async fn list_pending_elicitation(
     Ok(Json(load_pending_elicitations(&state, &session_id).await?))
 }
 
+/// `POST /elicitation/{id}/respond` — 用户对 MCP Elicitation 提交 accept/decline/cancel。
 async fn respond_elicitation(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -252,13 +291,18 @@ async fn respond_elicitation(
     })))
 }
 
+/// `POST /sessions/{id}/runs/{run_id}/resume` 请求体（HITL 工具审批恢复）。
 #[derive(Deserialize)]
 struct ResumeRunBody {
+    /// 是否批准挂起的工具调用。
     approved: bool,
+    /// 用户备注（可选，写入 resume 上下文）。
     note: Option<String>,
+    /// 恢复时覆盖使用的模型 ID。
     model_id: Option<String>,
 }
 
+/// `POST /sessions/{id}/runs/{run_id}/resume` — HITL 批准后恢复 Run，SSE 流式返回。
 async fn resume_run(
     State(state): State<AppState>,
     Path((session_id, run_id)): Path<(String, String)>,
@@ -295,6 +339,7 @@ async fn resume_run(
     ))
 }
 
+/// `GET /sessions/{id}/plan` — 获取会话 ReAct 计划正文。
 async fn get_plan(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -307,12 +352,16 @@ async fn get_plan(
     Ok(Json(plan))
 }
 
+/// `PUT /sessions/{id}/plan` 请求体。
 #[derive(Deserialize)]
 struct PutPlanBody {
+    /// 计划 Markdown/文本内容。
     content: String,
+    /// 乐观锁版本号（可选，用于并发更新检测）。
     version: Option<i64>,
 }
 
+/// `PUT /sessions/{id}/plan` — 创建或更新 ReAct 计划。
 async fn put_plan(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -326,6 +375,7 @@ async fn put_plan(
     ))
 }
 
+/// `GET /sessions/{id}/todos` — 列出会话下所有 Todo 项。
 async fn list_todos(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -333,11 +383,14 @@ async fn list_todos(
     Ok(Json(state.react.list_todos(&id).await?))
 }
 
+/// `PATCH /sessions/{id}/todos/{task_key}` 请求体。
 #[derive(Deserialize)]
 struct PatchTodoBody {
+    /// 新状态（如 `pending` / `in_progress` / `done`）。
     status: String,
 }
 
+/// `PATCH /sessions/{id}/todos/{task_key}` — 更新单条 Todo 状态。
 async fn patch_todo(
     State(state): State<AppState>,
     Path((id, task_key)): Path<(String, String)>,
@@ -351,6 +404,7 @@ async fn patch_todo(
     ))
 }
 
+/// `POST /sessions/{id}/artifacts` — multipart 上传附件（字段名 `file`）。
 async fn upload_artifact(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -388,13 +442,17 @@ async fn upload_artifact(
     ))
 }
 
+/// Memory 检索/删除的 query 参数。
 #[derive(Deserialize)]
 struct MemorySearchQuery {
+    /// 搜索或删除匹配的关键词。
     q: String,
 }
 
+/// `GET /memory` 的 query 参数。
 #[derive(Deserialize)]
 struct MemoryListQuery {
+    /// 返回条数上限，默认 50。
     #[serde(default = "default_memory_limit")]
     limit: usize,
 }
@@ -403,11 +461,14 @@ fn default_memory_limit() -> usize {
     50
 }
 
+/// `POST /memory` 请求体。
 #[derive(Deserialize)]
 struct AddMemoryBody {
+    /// 要写入全局 memory 的文本内容。
     content: String,
 }
 
+/// `GET /memory` — 分页列出 memory 条目。
 async fn list_memory(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<MemoryListQuery>,
@@ -415,6 +476,7 @@ async fn list_memory(
     Ok(Json(state.facade.memory_list(q.limit).await?))
 }
 
+/// `POST /memory` — 向全局 memory 追加一条记录。
 async fn add_memory(
     State(state): State<AppState>,
     Json(body): Json<AddMemoryBody>,
@@ -426,6 +488,7 @@ async fn add_memory(
     Ok(StatusCode::CREATED)
 }
 
+/// `DELETE /memory?q=...` — 按关键词删除 memory 条目。
 async fn delete_memory(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<MemorySearchQuery>,
@@ -437,6 +500,7 @@ async fn delete_memory(
     Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
+/// `GET /memory/search?q=...` — 关键词检索 memory。
 async fn memory_search(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<MemorySearchQuery>,
@@ -444,6 +508,7 @@ async fn memory_search(
     Ok(Json(state.facade.memory_search(&q.q).await?))
 }
 
+/// `GET /sessions/{id}/export` — 导出会话为 Markdown 附件下载。
 async fn export_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -468,6 +533,7 @@ async fn export_session(
     Ok(resp)
 }
 
+/// `GET /skills` — 扫描本地 Skill 目录并返回摘要列表。
 async fn list_skills() -> Json<Vec<SkillSummary>> {
     Json(
         SkillLoader::scan(None)
@@ -481,10 +547,14 @@ async fn list_skills() -> Json<Vec<SkillSummary>> {
     )
 }
 
+/// `GET /usage/summary` 的 query 参数。
 #[derive(Deserialize)]
 struct UsageSummaryQuery {
+    /// 统计起始时间（RFC3339，可选）。
     from: Option<String>,
+    /// 统计结束时间（RFC3339，可选）。
     to: Option<String>,
+    /// 聚合维度：`model` / `day` / `session`，默认 `model`。
     #[serde(default = "default_group_by")]
     group_by: String,
 }
@@ -493,6 +563,7 @@ fn default_group_by() -> String {
     "model".into()
 }
 
+/// `GET /usage/summary` — 按维度汇总 token 用量与估算费用。
 async fn usage_summary(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<UsageSummaryQuery>,
@@ -509,22 +580,33 @@ async fn usage_summary(
     ))
 }
 
+/// `POST /auth/tokens` 请求体。
 #[derive(Deserialize)]
 struct CreateTokenBody {
+    /// Token 显示名称（便于管理识别）。
     name: String,
+    /// 授权 scope 列表，默认 `["admin", "*"]`。
     scopes: Option<Vec<String>>,
+    /// 过期时间（RFC3339，可选；空表示不过期）。
     expires_at: Option<String>,
 }
 
+/// `POST /auth/tokens` 响应（明文 token 仅此次返回）。
 #[derive(Serialize)]
 struct CreateTokenResponse {
+    /// Token 记录 ID。
     id: String,
+    /// Token 名称。
     name: String,
+    /// 明文 Bearer Token（请妥善保存，之后不可再查）。
     token: String,
+    /// 生效的 scope 列表。
     scopes: Vec<String>,
+    /// 创建时间。
     created_at: String,
 }
 
+/// `POST /auth/tokens` — 创建 API Token；首个 Token 可无鉴权创建。
 async fn create_token(
     State(state): State<AppState>,
     auth: Option<Extension<AuthContext>>,
@@ -551,6 +633,7 @@ async fn create_token(
     }))
 }
 
+/// `GET /auth/tokens` — 列出所有 Token（不含明文，需 admin scope）。
 async fn list_tokens(
     State(state): State<AppState>,
     auth: Extension<AuthContext>,
@@ -559,28 +642,38 @@ async fn list_tokens(
     Ok(Json(state.api_tokens.list().await?))
 }
 
+/// `POST /jobs` 请求体。
 #[derive(Deserialize)]
 struct CreateJobBody {
+    /// 任务显示名称。
     name: String,
+    /// 任务类型（如 `ping` / `log`）。
     job_type: String,
+    /// 调度周期（`hourly` / `daily`，可选）。
     #[serde(default)]
     schedule: Option<String>,
+    /// JSON 载荷字符串，默认 `{}`。
     #[serde(default)]
     payload: Option<String>,
+    /// 首次执行时间（RFC3339，可选）。
     #[serde(default)]
     run_at: Option<String>,
 }
 
+/// `PATCH /jobs/{id}` 请求体。
 #[derive(Deserialize)]
 struct UpdateJobBody {
+    /// 启用/禁用任务。
     #[serde(default)]
     enabled: Option<bool>,
 }
 
+/// `GET /jobs` — 列出所有后台任务。
 async fn list_jobs(State(state): State<AppState>) -> Result<Json<Vec<JobRecord>>, ApiError> {
     Ok(Json(state.jobs.list().await?))
 }
 
+/// `POST /jobs` — 创建后台任务。
 async fn create_job(
     State(state): State<AppState>,
     Json(body): Json<CreateJobBody>,
@@ -604,6 +697,7 @@ async fn create_job(
     ))
 }
 
+/// `PATCH /jobs/{id}` — 更新任务（当前仅支持 enabled）。
 async fn update_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -615,6 +709,7 @@ async fn update_job(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `DELETE /jobs/{id}` — 删除任务。
 async fn delete_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -625,6 +720,7 @@ async fn delete_job(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /jobs/{id}/run` — 立即执行一次任务（不等待调度）。
 async fn run_job_now(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -652,6 +748,7 @@ async fn run_job_now(
         .map_err(Into::into)
 }
 
+/// `DELETE /auth/tokens/{id}` — 吊销 API Token（需 admin scope）。
 async fn revoke_token(
     State(state): State<AppState>,
     auth: Extension<AuthContext>,
@@ -664,13 +761,18 @@ async fn revoke_token(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Skill 扫描结果摘要（`GET /skills` 响应项）。
 #[derive(Serialize)]
 struct SkillSummary {
+    /// Skill 名称（来自 frontmatter）。
     name: String,
+    /// Skill 描述。
     description: String,
+    /// SKILL.md 文件绝对路径。
     file_path: String,
 }
 
+/// 将 `MacoError` 映射为 HTTP 状态码的包装类型。
 struct ApiError(MacoError);
 
 impl From<MacoError> for ApiError {

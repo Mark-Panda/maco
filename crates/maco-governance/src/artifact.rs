@@ -1,3 +1,6 @@
+//! 上传附件校验：MIME 白名单与大小上限。
+
+/// 单文件最大 20MB。
 pub const MAX_ARTIFACT_BYTES: usize = 20 * 1024 * 1024;
 
 const ALLOWED_MIMES: &[&str] = &[

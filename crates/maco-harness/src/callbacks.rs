@@ -1,3 +1,5 @@
+//! adk 六类 Callback 工厂：写 `maco_callback_logs`、统计用量，并在 `before_tool` 接入 HITL。
+
 use std::sync::Arc;
 
 use adk_core::{
@@ -7,6 +9,7 @@ use adk_core::{
 use maco_governance::prepare_log_payload;
 use maco_telemetry::MacoCallbackLogger;
 
+/// `before_agent`：记录阶段开始，不写 payload。
 pub fn before_agent(logger: Arc<MacoCallbackLogger>) -> BeforeAgentCallback {
     Box::new(move |ctx| {
         let logger = Arc::clone(&logger);
@@ -19,6 +22,7 @@ pub fn before_agent(logger: Arc<MacoCallbackLogger>) -> BeforeAgentCallback {
     })
 }
 
+/// `after_agent`：记录阶段结束。
 pub fn after_agent(logger: Arc<MacoCallbackLogger>) -> AfterAgentCallback {
     Box::new(move |ctx| {
         let logger = Arc::clone(&logger);
@@ -31,6 +35,7 @@ pub fn after_agent(logger: Arc<MacoCallbackLogger>) -> AfterAgentCallback {
     })
 }
 
+/// `before_model`：脱敏后记录模型请求内容。
 pub fn before_model(logger: Arc<MacoCallbackLogger>) -> BeforeModelCallback {
     Box::new(move |ctx, request| {
         let logger = Arc::clone(&logger);
@@ -46,6 +51,7 @@ pub fn before_model(logger: Arc<MacoCallbackLogger>) -> BeforeModelCallback {
     })
 }
 
+/// `after_model`：记录响应并在终态时写入 `maco_usage_stats`。
 pub fn after_model(
     logger: Arc<MacoCallbackLogger>,
     usage: Option<crate::usage::SharedUsageContext>,
@@ -71,6 +77,7 @@ pub fn after_model(
 
 use crate::hitl::HitlGate;
 
+/// `before_tool`：写工具调用日志，并按策略触发 HITL 确认。
 pub fn before_tool_with_hitl(
     logger: Arc<MacoCallbackLogger>,
     hitl: Arc<HitlGate>,
@@ -99,6 +106,7 @@ pub fn before_tool_with_hitl(
     })
 }
 
+/// `after_tool`：记录工具执行结果与耗时。
 pub fn after_tool(logger: Arc<MacoCallbackLogger>) -> AfterToolCallback {
     Box::new(move |ctx| {
         let logger = Arc::clone(&logger);

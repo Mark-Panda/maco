@@ -1,3 +1,5 @@
+//! 治理层脱敏：PII 正则 + 日志/SSE 统一出口。
+
 use std::sync::OnceLock;
 
 use adk_guardrail::PiiRedactor;

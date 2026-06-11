@@ -1,3 +1,5 @@
+//! maco HTTP 服务入口：`init` / `backup` 子命令与 Axum 路由装配。
+
 mod auth;
 mod export;
 mod models_api;
@@ -23,18 +25,24 @@ use crate::openapi::ApiDoc;
 use crate::routes::api_router;
 use crate::state::AppState;
 
+/// 命令行参数。
 #[derive(Parser)]
 #[command(name = "maco-server")]
 struct Cli {
+    /// 子命令：`init` 初始化库表，`backup` 备份数据文件。
     #[command(subcommand)]
     command: Option<Commands>,
+    /// HTTP 绑定地址（无子命令时启动服务）。
     #[arg(long, default_value = "127.0.0.1:8080")]
     bind: String,
 }
 
+/// 子命令枚举。
 #[derive(Subcommand)]
 enum Commands {
+    /// 初始化数据库与默认配置。
     Init,
+    /// 备份 `~/.maco/data` 下 SQLite 与附件。
     Backup,
 }
 
