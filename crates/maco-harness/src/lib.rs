@@ -5,12 +5,17 @@ pub mod elicitation;
 pub mod harness;
 pub mod hitl;
 pub mod mcp_pool;
+pub mod run_stream;
 pub mod model_factory;
 pub mod orchestrator;
 pub mod skills;
 pub mod usage;
 
-pub use elicitation::{ElicitationBroker, ElicitationRespondBody, MacoElicitationHandler};
+pub use elicitation::{
+    DynamicElicitationHandler, ElicitationBroker, ElicitationRespondBody, ElicitationRunContext,
+    MacoElicitationHandler,
+};
+pub use run_stream::RunStreamRegistry;
 pub use harness::MacoHarness;
 pub use mcp_pool::McpPool;
 pub use orchestrator::RunOrchestrator;

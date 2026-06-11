@@ -13,40 +13,37 @@ use maco_governance::{pii_guardrail_enabled, pricing_from_model, redact_sse_payl
 use maco_react::ReactTools;
 use maco_storage::AdkStorage;
 use maco_telemetry::MacoCallbackLogger;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 use crate::callbacks::{
     after_agent, after_model, after_tool, before_agent, before_model, before_tool_with_hitl,
 };
-use crate::elicitation::{respond_to_elicitation, ElicitationBroker, MacoElicitationHandler};
+use crate::elicitation::{
+    respond_to_elicitation, ElicitationBroker, ElicitationRunContext, MacoElicitationHandler,
+};
 use crate::hitl::{build_resume_content, HitlGate};
+use crate::mcp_pool::McpPool;
 use crate::model_factory::build_llm;
 use crate::orchestrator::RunOrchestrator;
+use crate::run_stream::RunStreamRegistry;
 use crate::skills::SkillLoader;
 use crate::usage::UsageContext;
 
 /// Agent 编排入口：绑定存储、Run 状态机、回调日志与工具策略，驱动一次完整对话 Run。
 pub struct MacoHarness {
-    /// adk Session/Memory 存储。
     storage: Arc<AdkStorage>,
-    /// Run 状态机编排器。
     orchestrator: RunOrchestrator,
-    /// ReAct plan/todo 仓库。
     react: ReactRepo,
-    /// Agent 回调日志仓库。
     callback_logs: CallbackLogRepo,
-    /// 用量统计仓库。
     usage: UsageRepo,
-    /// Elicitation 持久化仓库。
     elicitation: ElicitationRepo,
-    /// Elicitation 内存等待通道。
     elicitation_broker: ElicitationBroker,
-    /// 启用的工具 HITL 策略列表。
-    tool_policies: Vec<ToolPolicyRecord>,
+    tool_policies: Arc<RwLock<Vec<ToolPolicyRecord>>>,
+    mcp_pool: Arc<McpPool>,
+    run_streams: RunStreamRegistry,
 }
 
 impl MacoHarness {
-    /// 构造 Harness，注入各持久化与策略依赖。
     pub fn new(
         storage: Arc<AdkStorage>,
         orchestrator: RunOrchestrator,
@@ -55,6 +52,8 @@ impl MacoHarness {
         usage: UsageRepo,
         elicitation: ElicitationRepo,
         tool_policies: Vec<ToolPolicyRecord>,
+        mcp_pool: Arc<McpPool>,
+        run_streams: RunStreamRegistry,
     ) -> Self {
         Self {
             storage,
@@ -64,16 +63,29 @@ impl MacoHarness {
             usage,
             elicitation,
             elicitation_broker: ElicitationBroker::new(),
-            tool_policies,
+            tool_policies: Arc::new(RwLock::new(tool_policies)),
+            mcp_pool,
+            run_streams,
         }
     }
 
-    /// 返回 MCP Elicitation 的等待/唤醒协调器。
+    /// 热更新 HITL 工具策略（影响后续新 Run）。
+    pub async fn set_tool_policies(&self, policies: Vec<ToolPolicyRecord>) {
+        *self.tool_policies.write().await = policies;
+    }
+
     pub fn elicitation_broker(&self) -> &ElicitationBroker {
         &self.elicitation_broker
     }
 
-    /// 为指定 MCP 连接创建 Elicitation 处理器（挂到 MCP 客户端时使用）。
+    pub fn run_streams(&self) -> &RunStreamRegistry {
+        &self.run_streams
+    }
+
+    pub fn mcp_pool(&self) -> &Arc<McpPool> {
+        &self.mcp_pool
+    }
+
     pub fn create_elicitation_handler(
         &self,
         session_id: &str,
@@ -89,16 +101,16 @@ impl MacoHarness {
             repo: self.elicitation.clone(),
             broker: self.elicitation_broker.clone(),
             sse_tx,
+            stream: Some(self.run_streams.clone()),
         })
     }
 
-    /// 用户提交 Elicitation 响应（accept/decline/cancel），唤醒挂起的 Run。
     pub async fn respond_elicitation(
         &self,
         elicitation_id: &str,
         action: rmcp::model::ElicitationAction,
         content: Option<serde_json::Value>,
-    ) -> maco_core::MacoResult<bool> {
+    ) -> MacoResult<bool> {
         respond_to_elicitation(
             &self.elicitation,
             &self.elicitation_broker,
@@ -109,17 +121,23 @@ impl MacoHarness {
         .await
     }
 
-    /// 访问 Run 生命周期编排器。
+    /// 中断会话上活跃的 Runner，并将 Run 标为 cancelled。
+    pub async fn interrupt_session(&self, session_id: &str) -> MacoResult<Option<String>> {
+        let Some(run_id) = self.run_streams.interrupt(session_id).await else {
+            return Ok(None);
+        };
+        self.orchestrator.cancel_run(&run_id).await?;
+        Ok(Some(run_id))
+    }
+
     pub fn orchestrator(&self) -> &RunOrchestrator {
         &self.orchestrator
     }
 
-    /// 访问 adk Session/Memory 存储适配层。
     pub fn storage(&self) -> &AdkStorage {
         &self.storage
     }
 
-    /// 拼装系统指令：基础 ReAct 说明 + 已扫描的 Skill 摘要。
     fn build_instruction(&self) -> String {
         let mut instruction = String::from(
             "You are maco, a helpful personal assistant. \
@@ -135,7 +153,6 @@ impl MacoHarness {
         instruction
     }
 
-    /// 发起一次用户聊天 Run，返回 `run_id` 与 SSE 事件接收端。
     pub async fn run_chat(
         &self,
         session_id: &str,
@@ -146,7 +163,6 @@ impl MacoHarness {
             .await
     }
 
-    /// HITL 用户确认/拒绝后，基于 `resume_context` 开启子 Run 继续执行。
     pub async fn resume_run(
         &self,
         session_id: &str,
@@ -184,7 +200,6 @@ impl MacoHarness {
             .await
     }
 
-    /// 内部统一入口：组装 Agent/Runner，异步消费事件流并推送 SSE。
     async fn run_with_content(
         &self,
         session_id: &str,
@@ -202,7 +217,18 @@ impl MacoHarness {
         };
         let run_id = run.id.clone();
         let run_id_for_task = run_id.clone();
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(256);
+
+        self.mcp_pool
+            .elicitation()
+            .set_run_context(ElicitationRunContext {
+                session_id: session_id.to_string(),
+                run_id: run_id.clone(),
+                mcp_server: "mcp".into(),
+                sse_tx: Some(tx.clone()),
+                session_broadcast: Some(session_id.to_string()),
+            })
+            .await;
 
         let llm = build_llm(model)?;
         let react_tools = ReactTools::new(self.react.clone());
@@ -211,12 +237,14 @@ impl MacoHarness {
             session_id.to_string(),
             run_id.clone(),
         );
+        let streams = self.run_streams.clone();
         let hitl = Arc::new(HitlGate {
             run_id: run_id.clone(),
             session_id: session_id.to_string(),
             orchestrator: self.orchestrator.clone(),
-            policies: self.tool_policies.clone(),
+            policies: self.tool_policies.read().await.clone(),
             sse_tx: Some(tx.clone()),
+            stream: Some(streams.clone()),
         });
         let usage_ctx = Arc::new(UsageContext {
             repo: self.usage.clone(),
@@ -243,18 +271,28 @@ impl MacoHarness {
         for tool in react_tools.as_tool_arcs() {
             builder = builder.tool(tool);
         }
+        for ts in self.mcp_pool.toolsets().await {
+            builder = builder.toolset(ts);
+        }
 
         let agent = builder
             .build()
             .map_err(|e| MacoError::Adk(e.to_string()))?;
 
-        let runner = Runner::builder()
-            .app_name(APP_NAME)
-            .agent(Arc::new(agent))
-            .session_service(self.storage.session_service())
-            .memory_service(self.storage.memory_service())
-            .build()
-            .map_err(|e| MacoError::Adk(e.to_string()))?;
+        let runner = Arc::new(
+            Runner::builder()
+                .app_name(APP_NAME)
+                .agent(Arc::new(agent))
+                .session_service(self.storage.session_service())
+                .memory_service(self.storage.memory_service())
+                .build()
+                .map_err(|e| MacoError::Adk(e.to_string()))?,
+        );
+
+        let _btx = self
+            .run_streams
+            .register(session_id, run_id.clone(), runner.clone())
+            .await;
 
         let user_id = UserId::try_from(USER_ID).map_err(|e| MacoError::Adk(e.to_string()))?;
         let sid = SessionId::try_from(session_id).map_err(|e| MacoError::Adk(e.to_string()))?;
@@ -265,6 +303,8 @@ impl MacoHarness {
             .map_err(|e| MacoError::Adk(e.to_string()))?;
 
         let orchestrator = self.orchestrator.clone();
+        let session_id_task = session_id.to_string();
+        let streams_task = self.run_streams.clone();
         tokio::spawn(async move {
             let run_id = run_id_for_task;
             let mut ok = true;
@@ -274,14 +314,32 @@ impl MacoHarness {
                         if let Ok(seq) = orchestrator.next_seq(&run_id).await {
                             let text = redact_text(&extract_event_text(&event));
                             if !text.is_empty() {
-                                let _ = tx
-                                    .send(SseEnvelope {
+                                publish_sse(
+                                    &streams_task,
+                                    &session_id_task,
+                                    &tx,
+                                    SseEnvelope {
                                         event_type: "text".into(),
                                         run_id: run_id.clone(),
                                         seq,
                                         payload: serde_json::json!({ "content": text }),
-                                    })
-                                    .await;
+                                    },
+                                )
+                                .await;
+                            }
+                            if let Some(tool_ev) = extract_tool_event(&event) {
+                                publish_sse(
+                                    &streams_task,
+                                    &session_id_task,
+                                    &tx,
+                                    SseEnvelope {
+                                        event_type: "tool_call".into(),
+                                        run_id: run_id.clone(),
+                                        seq,
+                                        payload: tool_ev,
+                                    },
+                                )
+                                .await;
                             }
                         }
                     }
@@ -291,14 +349,18 @@ impl MacoHarness {
                         let mut err_payload =
                             serde_json::json!({ "message": e.to_string() });
                         redact_sse_payload(&mut err_payload);
-                        let _ = tx
-                            .send(SseEnvelope {
+                        publish_sse(
+                            &streams_task,
+                            &session_id_task,
+                            &tx,
+                            SseEnvelope {
                                 event_type: "error".into(),
                                 run_id: run_id.clone(),
                                 seq: 0,
                                 payload: err_payload,
-                            })
-                            .await;
+                            },
+                        )
+                        .await;
                         break;
                     }
                 }
@@ -312,28 +374,37 @@ impl MacoHarness {
                     }
                 }
                 if let Ok(seq) = orchestrator.next_seq(&run_id).await {
-                    let _ = tx
-                        .send(SseEnvelope {
+                    publish_sse(
+                        &streams_task,
+                        &session_id_task,
+                        &tx,
+                        SseEnvelope {
                             event_type: "done".into(),
-                            run_id,
+                            run_id: run_id.clone(),
                             seq,
                             payload: serde_json::json!({}),
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                 }
             }
+            streams_task.unregister(&session_id_task).await;
         });
 
         Ok((run_id, rx))
     }
-
-    /// 中断指定 session 上正在进行的 Runner 流式生成。
-    pub fn interrupt(&self, session_id: &str, runner: &Runner) -> bool {
-        runner.interrupt(session_id)
-    }
 }
 
-/// 将用户纯文本包装为 adk `Content`。
+async fn publish_sse(
+    streams: &RunStreamRegistry,
+    session_id: &str,
+    mpsc_tx: &mpsc::Sender<SseEnvelope>,
+    env: SseEnvelope,
+) {
+    let _ = mpsc_tx.send(env.clone()).await;
+    streams.publish(session_id, env).await;
+}
+
 fn user_text_content(user_text: &str) -> Content {
     Content {
         role: "user".into(),
@@ -343,7 +414,6 @@ fn user_text_content(user_text: &str) -> Content {
     }
 }
 
-/// 按环境变量组装 Agent 输入/输出 PII 护栏。
 fn agent_guardrails() -> GuardrailSet {
     let mut set = GuardrailSet::new();
     if pii_guardrail_enabled() {
@@ -352,7 +422,6 @@ fn agent_guardrails() -> GuardrailSet {
     set
 }
 
-/// 从 adk 事件中抽取可展示的纯文本片段。
 fn extract_event_text(event: &Event) -> String {
     event
         .llm_response
@@ -369,4 +438,18 @@ fn extract_event_text(event: &Event) -> String {
                 .join("")
         })
         .unwrap_or_default()
+}
+
+fn extract_tool_event(event: &Event) -> Option<serde_json::Value> {
+    let content = event.llm_response.content.as_ref()?;
+    for part in &content.parts {
+        if let Part::FunctionCall { name, args, id, .. } = part {
+            return Some(serde_json::json!({
+                "name": name,
+                "args": args,
+                "call_id": id,
+            }));
+        }
+    }
+    None
 }

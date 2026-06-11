@@ -95,8 +95,15 @@ pub fn before_tool_with_hitl(
 
             let args = ctx.tool_input().cloned().unwrap_or(serde_json::json!({}));
             let call_id = ctx.invocation_id().to_string();
+            let source = if tool_name.contains("__") {
+                "mcp"
+            } else if ctx.tool_name().map(|n| n.starts_with("update_") || n == "upsert_todo").unwrap_or(false) {
+                "tool"
+            } else {
+                "tool"
+            };
             if let Some(content) = hitl
-                .check_before_tool("tool", tool_name, &args, &call_id)
+                .check_before_tool(source, tool_name, &args, &call_id)
                 .await?
             {
                 return Ok(Some(content));

@@ -45,4 +45,26 @@ impl SkillLoader {
         }
         skills
     }
+
+    /// 按名称查找单个 Skill（名称与文件名 stem 一致）。
+    pub fn get(name: &str, dir: Option<&Path>) -> Option<SkillDefinition> {
+        Self::scan(dir).into_iter().find(|s| s.name == name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn get_finds_skill_by_name() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let path = tmp.path().join("demo.md");
+        fs::write(&path, "# Demo skill\n").expect("write");
+        let skill = SkillLoader::get("demo", Some(tmp.path())).expect("found");
+        assert_eq!(skill.name, "demo");
+        assert!(skill.content.contains("Demo skill"));
+    }
 }

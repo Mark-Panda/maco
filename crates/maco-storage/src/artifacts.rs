@@ -58,4 +58,28 @@ impl ArtifactStore {
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
     }
+
+    /// 附件元数据仓库（列表查询等）。
+    pub fn repo(&self) -> &ArtifactRepo {
+        &self.repo
+    }
+
+    /// 读取会话附件二进制（校验 session 归属）。
+    pub async fn read(
+        &self,
+        session_id: &str,
+        artifact_id: &str,
+    ) -> MacoResult<(ArtifactRecord, Vec<u8>)> {
+        let record = self
+            .repo
+            .get(artifact_id)
+            .await?
+            .ok_or_else(|| MacoError::not_found("artifact"))?;
+        if record.session_id != session_id {
+            return Err(MacoError::not_found("artifact"));
+        }
+        let bytes = std::fs::read(&record.storage_path)
+            .map_err(|e| MacoError::config(format!("read artifact: {e}")))?;
+        Ok((record, bytes))
+    }
 }

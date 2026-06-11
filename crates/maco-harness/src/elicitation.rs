@@ -60,6 +60,113 @@ impl Default for ElicitationBroker {
     }
 }
 
+/// 单次 Run 的 Elicitation 上下文（由 Harness 在每轮对话前写入）。
+#[derive(Clone, Default)]
+pub struct ElicitationRunContext {
+    /// 会话 ID。
+    pub session_id: String,
+    /// Run ID。
+    pub run_id: String,
+    /// 默认 MCP 服务名（未知时 `mcp`）。
+    pub mcp_server: String,
+    /// 直接 SSE 通道（兼容旧路径）。
+    pub sse_tx: Option<mpsc::Sender<SseEnvelope>>,
+    /// 可选：经 RunStreamRegistry 广播。
+    pub session_broadcast: Option<String>,
+}
+
+/// 共享 Elicitation 处理器：MCP 连接池注册一次，按 Run 动态切换上下文。
+pub struct DynamicElicitationHandler {
+    ctx: Arc<Mutex<ElicitationRunContext>>,
+    orchestrator: RunOrchestrator,
+    repo: ElicitationRepo,
+    broker: ElicitationBroker,
+    stream: Option<crate::run_stream::RunStreamRegistry>,
+}
+
+impl DynamicElicitationHandler {
+    pub fn new(
+        orchestrator: RunOrchestrator,
+        repo: ElicitationRepo,
+        broker: ElicitationBroker,
+        stream: Option<crate::run_stream::RunStreamRegistry>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            ctx: Arc::new(Mutex::new(ElicitationRunContext::default())),
+            orchestrator,
+            repo,
+            broker,
+            stream,
+        })
+    }
+
+    /// 在每轮 `run_chat` / `resume_run` 开始前更新上下文。
+    pub async fn set_run_context(&self, ctx: ElicitationRunContext) {
+        *self.ctx.lock().await = ctx;
+    }
+
+    async fn snapshot(&self) -> ElicitationRunContext {
+        self.ctx.lock().await.clone()
+    }
+
+    async fn wait_for_user(
+        &self,
+        request_type: &str,
+        payload: Value,
+        external_id: Option<&str>,
+    ) -> Result<CreateElicitationResult, Box<dyn std::error::Error + Send + Sync>> {
+        let snap = self.snapshot().await;
+        let handler = MacoElicitationHandler {
+            session_id: snap.session_id.clone(),
+            run_id: snap.run_id.clone(),
+            mcp_server: snap.mcp_server.clone(),
+            orchestrator: self.orchestrator.clone(),
+            repo: self.repo.clone(),
+            broker: self.broker.clone(),
+            sse_tx: snap.sse_tx.clone(),
+            stream: self.stream.clone(),
+        };
+        handler
+            .wait_for_user(request_type, payload, external_id)
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl ElicitationHandler for DynamicElicitationHandler {
+    async fn handle_form_elicitation(
+        &self,
+        message: &str,
+        schema: &ElicitationSchema,
+        metadata: Option<&Value>,
+    ) -> Result<CreateElicitationResult, Box<dyn std::error::Error + Send + Sync>> {
+        let _ = metadata;
+        let schema_value = serde_json::to_value(schema)?;
+        let payload = serde_json::json!({
+            "message": message,
+            "schema": schema_value,
+            "metadata": metadata,
+        });
+        self.wait_for_user("form", payload, None).await
+    }
+
+    async fn handle_url_elicitation(
+        &self,
+        message: &str,
+        url: &str,
+        elicitation_id: &str,
+        metadata: Option<&Value>,
+    ) -> Result<CreateElicitationResult, Box<dyn std::error::Error + Send + Sync>> {
+        let payload = serde_json::json!({
+            "message": message,
+            "url": url,
+            "metadata": metadata,
+        });
+        self.wait_for_user("url", payload, Some(elicitation_id))
+            .await
+    }
+}
+
 /// adk `ElicitationHandler` 实现：落库、切 Run 为 `awaiting_user`、经 SSE 通知前端。
 pub struct MacoElicitationHandler {
     /// 当前会话 ID。
@@ -76,11 +183,13 @@ pub struct MacoElicitationHandler {
     pub broker: ElicitationBroker,
     /// SSE 事件发送通道（推送给前端）。
     pub sse_tx: Option<mpsc::Sender<SseEnvelope>>,
+    /// 可选广播注册表（多订阅者重连）。
+    pub stream: Option<crate::run_stream::RunStreamRegistry>,
 }
 
 impl MacoElicitationHandler {
     /// 通用等待流程：写 DB → 暂停 Run → 推 SSE → 阻塞至用户响应或超时。
-    async fn wait_for_user(
+    pub(crate) async fn wait_for_user(
         &self,
         request_type: &str,
         payload: Value,
@@ -122,24 +231,26 @@ impl MacoElicitationHandler {
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
+        let seq = self.orchestrator.next_seq(&self.run_id).await.unwrap_or(0);
+        let env = SseEnvelope {
+            event_type: "elicitation_request".into(),
+            run_id: self.run_id.clone(),
+            seq,
+            payload: serde_json::json!({
+                "elicitation_id": elicitation_id,
+                "request_type": request_type,
+                "message": payload.get("message"),
+                "schema": payload.get("schema"),
+                "url": payload.get("url"),
+                "mcp_server": self.mcp_server,
+                "status": RUN_STATUS_AWAITING_USER,
+            }),
+        };
         if let Some(tx) = &self.sse_tx {
-            let seq = self.orchestrator.next_seq(&self.run_id).await.unwrap_or(0);
-            let _ = tx
-                .send(SseEnvelope {
-                    event_type: "elicitation_request".into(),
-                    run_id: self.run_id.clone(),
-                    seq,
-                    payload: serde_json::json!({
-                        "elicitation_id": elicitation_id,
-                        "request_type": request_type,
-                        "message": payload.get("message"),
-                        "schema": payload.get("schema"),
-                        "url": payload.get("url"),
-                        "mcp_server": self.mcp_server,
-                        "status": RUN_STATUS_AWAITING_USER,
-                    }),
-                })
-                .await;
+            let _ = tx.send(env.clone()).await;
+        }
+        if let Some(reg) = &self.stream {
+            reg.publish(&self.session_id, env).await;
         }
 
         let rx = self.broker.register(elicitation_id.clone()).await;

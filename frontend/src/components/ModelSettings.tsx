@@ -98,7 +98,7 @@ export function ModelSettings({ models, onChange }: Props) {
   }
 
   async function remove(id: string) {
-    if (!confirm("Delete this model?")) return;
+    if (!confirm("确定删除该模型配置？")) return;
     await deleteModel(id);
     onChange(await fetchModels());
     if (editing === id) resetForm();
@@ -107,15 +107,15 @@ export function ModelSettings({ models, onChange }: Props) {
   return (
     <div className="panel-section">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-        <h3 style={{ margin: 0 }}>Models</h3>
+        <h3 style={{ margin: 0 }}>模型</h3>
         <button type="button" className="btn btn-sm btn-primary" onClick={startNew}>
-          + Add
+          + 添加
         </button>
       </div>
 
       {models.length === 0 && !editing && (
         <p style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>
-          No models configured. Add one with your API key and base URL.
+          尚未配置模型，请添加 API Key 与 Base URL。
         </p>
       )}
 
@@ -123,22 +123,22 @@ export function ModelSettings({ models, onChange }: Props) {
         <div key={m.id} className="model-list-item">
           <div>
             <strong>{m.name}</strong>
-            {m.is_default && <span className="badge" style={{ marginLeft: 6 }}>default</span>}
+            {m.is_default && <span className="badge" style={{ marginLeft: 6 }}>默认</span>}
             <div className="model-meta">
               {m.provider} · {m.model_id}
             </div>
             {m.base_url && <div className="model-meta">{m.base_url}</div>}
             <div className="model-meta">
               {m.has_api_key
-                ? `Key: ${m.api_key_preview ?? "configured"}`
+                ? `密钥: ${m.api_key_preview ?? "已配置"}`
                 : m.api_key_env
-                  ? `Env: ${m.api_key_env}`
-                  : "No API key"}
+                  ? `环境变量: ${m.api_key_env}`
+                  : "未配置 API Key"}
             </div>
           </div>
           <div style={{ display: "flex", gap: 4 }}>
             <button type="button" className="btn btn-sm" onClick={() => startEdit(m)}>
-              Edit
+              编辑
             </button>
             <button type="button" className="btn btn-sm btn-ghost" onClick={() => remove(m.id)}>
               ×
@@ -150,15 +150,15 @@ export function ModelSettings({ models, onChange }: Props) {
       {editing && (
         <div className="panel-card" style={{ marginTop: 12 }}>
           <div className="field">
-            <label>Display name</label>
+            <label>显示名称</label>
             <input
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="My GPT"
+              placeholder="我的 GPT"
             />
           </div>
           <div className="field">
-            <label>Provider</label>
+            <label>提供商</label>
             <select
               value={form.provider}
               onChange={(e) => {
@@ -171,8 +171,8 @@ export function ModelSettings({ models, onChange }: Props) {
                 });
               }}
             >
-              <option value="openai">OpenAI / compatible</option>
-              <option value="anthropic">Anthropic / compatible</option>
+              <option value="openai">OpenAI / 兼容</option>
+              <option value="anthropic">Anthropic / 兼容</option>
             </select>
           </div>
           <div className="field">
@@ -197,12 +197,12 @@ export function ModelSettings({ models, onChange }: Props) {
               type="password"
               value={form.api_key}
               onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-              placeholder={editing !== "new" ? "Leave blank to keep existing" : "sk-..."}
+              placeholder={editing !== "new" ? "留空则保持原密钥" : "sk-..."}
               autoComplete="off"
             />
           </div>
           <div className="field">
-            <label>Or env var name (optional fallback)</label>
+            <label>或环境变量名（可选兜底）</label>
             <input
               value={form.api_key_env}
               onChange={(e) => setForm({ ...form, api_key_env: e.target.value })}
@@ -215,15 +215,15 @@ export function ModelSettings({ models, onChange }: Props) {
               checked={form.is_default}
               onChange={(e) => setForm({ ...form, is_default: e.target.checked })}
             />
-            Set as default model
+            设为默认模型
           </label>
           {error && <p style={{ color: "#f87171", fontSize: "0.8rem" }}>{error}</p>}
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" className="btn btn-sm btn-primary" disabled={saving} onClick={save}>
-              {saving ? "Saving…" : "Save"}
+              {saving ? "保存中…" : "保存"}
             </button>
             <button type="button" className="btn btn-sm" onClick={resetForm}>
-              Cancel
+              取消
             </button>
           </div>
         </div>

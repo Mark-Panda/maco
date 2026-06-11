@@ -72,4 +72,23 @@ impl ArtifactRepo {
             created_at: now,
         })
     }
+
+    pub async fn get(&self, id: &str) -> MacoResult<Option<ArtifactRecord>> {
+        sqlx::query_as::<_, ArtifactRecord>("SELECT * FROM maco_artifacts WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| MacoError::database(e.to_string()))
+    }
+
+    /// 列出会话下全部附件元数据（不含二进制）。
+    pub async fn list_for_session(&self, session_id: &str) -> MacoResult<Vec<ArtifactRecord>> {
+        sqlx::query_as::<_, ArtifactRecord>(
+            "SELECT * FROM maco_artifacts WHERE session_id = ? ORDER BY created_at DESC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| MacoError::database(e.to_string()))
+    }
 }

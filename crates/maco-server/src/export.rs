@@ -60,9 +60,6 @@ pub async fn session_markdown(
 
     out.push_str("## Conversation\n\n");
     for event in session.events().all() {
-        if event.author == "maco" {
-            continue;
-        }
         let Some(content) = event.llm_response.content.as_ref() else {
             continue;
         };

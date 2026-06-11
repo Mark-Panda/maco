@@ -23,10 +23,10 @@ adk-session = { version = "=1.0.0", features = ["sqlite"] }
 adk-memory = { version = "=1.0.0", features = ["sqlite-memory"] }
 adk-runner = { version = "=1.0.0" }
 adk-core = { version = "=1.0.0" }
-adk-tool = { version = "=1.0.0", features = ["mcp"] }
+adk-tool = { version = "=1.0.0", features = ["mcp", "http-transport"] }
 axum = { version = "0.8", features = ["macros", "multipart"] }
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "migrate", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

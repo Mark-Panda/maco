@@ -4,11 +4,14 @@ use std::sync::Arc;
 
 use maco_db::{
     init_pool, seed_defaults, seed_tool_policies, ApiTokenRepo, ArtifactRepo, CallbackLogRepo,
-    ElicitationRepo, JobRepo, ModelRepo, ReactRepo, RunRepo, SessionMetaRepo, SettingsRepo,
-    ToolPolicyRepo, UsageRepo,
+    ElicitationRepo, JobRepo, McpServerRepo, ModelRepo, ReactRepo, RunRepo, SessionMetaRepo,
+    SettingsRepo, ToolPolicyRepo, UsageRepo,
 };
 use maco_governance::auth_disabled;
-use maco_harness::{MacoHarness, McpPool, RunOrchestrator};
+use maco_harness::{
+    DynamicElicitationHandler, ElicitationBroker, MacoHarness, McpPool, RunOrchestrator,
+    RunStreamRegistry,
+};
 use maco_storage::{AdkStorage, ArtifactStore};
 
 use crate::session_facade::SessionFacade;
@@ -36,6 +39,10 @@ pub struct AppState {
     pub elicitation: ElicitationRepo,
     /// 后台任务仓库。
     pub jobs: JobRepo,
+    /// MCP 服务配置仓库。
+    pub mcp_servers: McpServerRepo,
+    /// HITL 工具策略仓库。
+    pub tool_policies: ToolPolicyRepo,
     /// adk Session/Memory 存储。
     pub adk: Arc<AdkStorage>,
     /// Session + Memory 门面。
@@ -54,9 +61,9 @@ impl AppState {
         let db = init_pool(db_path).await?;
         let settings = SettingsRepo::new(db.pool.clone());
         seed_defaults(&settings).await?;
-        let tool_policies = ToolPolicyRepo::new(db.pool.clone());
-        seed_tool_policies(&tool_policies).await?;
-        let policies = tool_policies.list_enabled().await?;
+        let tool_policies_repo = ToolPolicyRepo::new(db.pool.clone());
+        seed_tool_policies(&tool_policies_repo).await?;
+        let policies = tool_policies_repo.list_enabled().await?;
 
         let callback_logs = CallbackLogRepo::new(db.pool.clone());
         let purged = callback_logs.purge_older_than_days(30).await?;
@@ -73,6 +80,7 @@ impl AppState {
         let usage = UsageRepo::new(db.pool.clone());
         let elicitation = ElicitationRepo::new(db.pool.clone());
         let jobs = JobRepo::new(db.pool.clone());
+        let mcp_servers = McpServerRepo::new(db.pool.clone());
         let artifact_repo = ArtifactRepo::new(db.pool.clone());
         let artifacts = Arc::new(ArtifactStore::new(paths.artifacts_dir.clone(), artifact_repo));
 
@@ -80,6 +88,22 @@ impl AppState {
         facade.reconcile().await?;
 
         let orchestrator = RunOrchestrator::new(RunRepo::new(db.pool.clone()));
+        let run_streams = RunStreamRegistry::new();
+        let elicitation_broker = ElicitationBroker::new();
+        let dynamic_elicitation = DynamicElicitationHandler::new(
+            orchestrator.clone(),
+            ElicitationRepo::new(db.pool.clone()),
+            elicitation_broker,
+            Some(run_streams.clone()),
+        );
+        let mcp_pool = Arc::new(McpPool::new(
+            McpServerRepo::new(db.pool.clone()),
+            dynamic_elicitation,
+        ));
+        if let Err(e) = mcp_pool.reload().await {
+            tracing::warn!("mcp pool initial reload: {e}");
+        }
+
         let adk_for_state = adk.clone();
         let harness = Arc::new(MacoHarness::new(
             adk,
@@ -89,6 +113,8 @@ impl AppState {
             UsageRepo::new(db.pool.clone()),
             ElicitationRepo::new(db.pool.clone()),
             policies,
+            mcp_pool.clone(),
+            run_streams,
         ));
 
         Ok(Self {
@@ -102,10 +128,12 @@ impl AppState {
             usage,
             elicitation,
             jobs,
+            mcp_servers,
+            tool_policies: tool_policies_repo,
             adk: adk_for_state,
             facade,
             harness,
-            mcp_pool: Arc::new(McpPool::new()),
+            mcp_pool,
             artifacts,
         })
     }

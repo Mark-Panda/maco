@@ -9,8 +9,8 @@ use chrono::Utc;
 use maco_storage::memory_admin;
 use adk_session::{CreateRequest, DeleteRequest, GetRequest, ListRequest};
 use maco_core::{
-    MacoError, MacoResult, MemoryListItem, MemoryListResponse, MemorySearchResponse, APP_NAME,
-    USER_ID,
+    ChatMessage, MacoError, MacoResult, MemoryListItem, MemoryListResponse, MemorySearchResponse,
+    SessionMessagesResponse, APP_NAME, USER_ID,
 };
 use maco_db::{ModelRecord, ModelRepo, SessionMetaRecord, SessionMetaRepo};
 use maco_storage::AdkStorage;
@@ -259,6 +259,43 @@ impl SessionFacade {
             .map_err(|e| MacoError::Adk(e.to_string()))
     }
 
+    /// 从 adk session events 提取用户/助手文本消息（供前端恢复对话）。
+    pub async fn session_messages(&self, session_id: &str) -> MacoResult<SessionMessagesResponse> {
+        let session = self
+            .adk
+            .session
+            .get(GetRequest {
+                app_name: APP_NAME.into(),
+                user_id: USER_ID.into(),
+                session_id: session_id.to_string(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await
+            .map_err(|e| MacoError::Adk(e.to_string()))?;
+
+        let mut messages = Vec::new();
+        for event in session.events().all() {
+            let Some(content) = event.llm_response.content.as_ref() else {
+                continue;
+            };
+            let text = message_text_from_content(content);
+            if text.is_empty() {
+                continue;
+            }
+            let role = if event.author == "user" {
+                "user"
+            } else {
+                "assistant"
+            };
+            messages.push(ChatMessage {
+                role: role.into(),
+                content: text,
+            });
+        }
+        Ok(SessionMessagesResponse { messages })
+    }
+
     /// 关键词检索 memory（当前为 adk 内置 keyword 模式）。
     pub async fn memory_search(&self, query: &str) -> MacoResult<MemorySearchResponse> {
         let resp = self
@@ -295,4 +332,16 @@ impl SessionFacade {
                 .collect(),
         })
     }
+}
+
+fn message_text_from_content(content: &Content) -> String {
+    content
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            Part::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }

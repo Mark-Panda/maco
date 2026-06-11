@@ -8,15 +8,14 @@ use axum::{
     Json, Router,
 };
 use maco_core::{pending_tools_from_resume, MacoError, RunStatusResponse};
-use maco_db::payload_summary;
+use maco_db::{payload_summary, JobRecord, McpServerRecord};
 use maco_harness::elicitation::{action_from_str, ElicitationRespondBody};
-use maco_db::JobRecord;
 use maco_governance::{
     generate_token, hash_token, pii_guardrail_enabled, scopes_json, SCOPE_ADMIN,
 };
 use maco_harness::SkillLoader;
 use serde::{Deserialize, Serialize};
-use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
+use tokio_stream::{wrappers::BroadcastStream, wrappers::ReceiverStream, StreamExt as _};
 
 use crate::auth::{require_admin, AuthContext};
 use crate::export::session_markdown;
@@ -32,13 +31,23 @@ pub fn api_router() -> Router<AppState> {
         // 会话 CRUD 与 ReAct plan/todo
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", patch(update_session).delete(delete_session))
+        .route("/sessions/{id}/messages", get(get_session_messages))
         .route("/sessions/{id}/plan", get(get_plan).put(put_plan))
         .route("/sessions/{id}/todos", get(list_todos))
         .route("/sessions/{id}/todos/{task_key}", patch(patch_todo))
-        .route("/sessions/{id}/artifacts", post(upload_artifact))
+        .route(
+            "/sessions/{id}/artifacts",
+            get(list_artifacts).post(upload_artifact),
+        )
+        .route(
+            "/sessions/{id}/artifacts/{artifact_id}",
+            get(download_artifact),
+        )
         .route("/sessions/{id}/export", get(export_session))
         // Run 状态查询、HITL/Elicitation 恢复
+        .route("/sessions/{id}/runs/active", get(get_active_run))
         .route("/sessions/{id}/runs/{run_id}", get(get_run))
+        .route("/sessions/{id}/runs/{run_id}/stream", get(stream_run))
         .route("/sessions/{id}/runs/{run_id}/resume", post(resume_run))
         .route("/sessions/{id}/elicitation/pending", get(list_pending_elicitation))
         .route("/elicitation/{id}/respond", post(respond_elicitation))
@@ -51,8 +60,23 @@ pub fn api_router() -> Router<AppState> {
         // 全局 Memory
         .route("/memory", get(list_memory).post(add_memory).delete(delete_memory))
         .route("/memory/search", get(memory_search))
+        // MCP 服务配置
+        .route("/mcp/servers", get(list_mcp_servers).post(create_mcp_server))
+        .route("/mcp/servers/{id}", patch(update_mcp_server).delete(delete_mcp_server))
+        .route("/mcp/reload", post(reload_mcp_pool))
+        // HITL 工具策略
+        .route(
+            "/tool-policies",
+            get(list_tool_policies).post(create_tool_policy),
+        )
+        .route("/tool-policies/reload", post(reload_tool_policies))
+        .route(
+            "/tool-policies/{id}",
+            patch(update_tool_policy).delete(delete_tool_policy),
+        )
         // Skill 扫描
         .route("/skills", get(list_skills))
+        .route("/skills/{name}", get(get_skill))
         // API Token 管理
         .route("/auth/tokens", get(list_tokens).post(create_token))
         .route("/auth/tokens/{id}", delete(revoke_token))
@@ -74,10 +98,10 @@ async fn guardrail_status() -> Json<serde_json::Value> {
 
 /// `GET /health` — 探活：数据库、MCP 池、Memory、Skill 数量与绑定地址。
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    let _guard = state.mcp_pool.acquire("health-check").await;
+    let mcp = state.mcp_pool.status_summary().await;
     Json(serde_json::json!({
         "db": "ok",
-        "mcp": ["pool_ready"],
+        "mcp": mcp,
         "memory": "ok",
         "skills": SkillLoader::scan(None).len(),
         "bind": state.bind_addr,
@@ -118,6 +142,14 @@ struct UpdateSessionBody {
     title: Option<String>,
     /// 新模型 ID（可选，会同步 adk state）。
     model_id: Option<String>,
+}
+
+/// `GET /sessions/{id}/messages` — 加载会话历史消息（供前端恢复对话）。
+async fn get_session_messages(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<maco_core::SessionMessagesResponse>, ApiError> {
+    Ok(Json(state.facade.session_messages(&id).await?))
 }
 
 /// `PATCH /sessions/{id}` — 更新会话标题或绑定模型。
@@ -220,11 +252,61 @@ async fn chat_sse(
     ))
 }
 
-/// `POST /chat/{session_id}/interrupt` — 中断当前会话聊天（占位实现）。
+/// `POST /chat/{session_id}/interrupt` — 中断当前会话活跃的 Agent Run。
 async fn interrupt_chat(
+    State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    Ok(Json(serde_json::json!({ "session_id": session_id, "interrupted": true })))
+    let run_id = state.harness.interrupt_session(&session_id).await?;
+    Ok(Json(serde_json::json!({
+        "session_id": session_id,
+        "interrupted": run_id.is_some(),
+        "run_id": run_id,
+    })))
+}
+
+/// `GET /sessions/{id}/runs/active` — 查询会话当前活跃 Run ID（用于 SSE 重连）。
+async fn get_active_run(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let run_id = state.harness.run_streams().active_run_id(&session_id).await;
+    Ok(Json(serde_json::json!({
+        "session_id": session_id,
+        "run_id": run_id,
+    })))
+}
+
+/// `GET /sessions/{id}/runs/{run_id}/stream` — 订阅活跃 Run 的 SSE 广播（断线重连）。
+async fn stream_run(
+    State(state): State<AppState>,
+    Path((session_id, run_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (active_id, rx) = state
+        .harness
+        .run_streams()
+        .subscribe(&session_id)
+        .await
+        .ok_or_else(|| MacoError::not_found("no active run for session"))?;
+    if active_id != run_id {
+        return Err(MacoError::not_found("run is not active").into());
+    }
+
+    let stream = BroadcastStream::new(rx).filter_map(|item: Result<maco_core::SseEnvelope, _>| {
+        item.ok().map(|env| {
+            let data = serde_json::to_string(&env).unwrap_or_else(|_| "{}".into());
+            Ok::<_, std::convert::Infallible>(format!("data: {data}\n\n"))
+        })
+    });
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "text/event-stream"),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        axum::body::Body::from_stream(stream),
+    ))
 }
 
 /// `GET /sessions/{id}/runs/{run_id}` — 查询 Run 状态与挂起的工具/Elicitation。
@@ -404,6 +486,43 @@ async fn patch_todo(
     ))
 }
 
+/// `GET /sessions/{id}/artifacts/{artifact_id}` — 下载附件二进制。
+async fn download_artifact(
+    State(state): State<AppState>,
+    Path((session_id, artifact_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (record, bytes) = state
+        .artifacts
+        .read(&session_id, &artifact_id)
+        .await?;
+    let disposition = format!(
+        "attachment; filename=\"{}\"",
+        record.filename.replace('"', "_")
+    );
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, record.mime_type),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        bytes,
+    ))
+}
+
+/// `GET /sessions/{id}/artifacts` — 列出会话已上传附件元数据。
+async fn list_artifacts(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Vec<maco_db::ArtifactRecord>>, ApiError> {
+    Ok(Json(
+        state
+            .artifacts
+            .repo()
+            .list_for_session(&session_id)
+            .await?,
+    ))
+}
+
 /// `POST /sessions/{id}/artifacts` — multipart 上传附件（字段名 `file`）。
 async fn upload_artifact(
     State(state): State<AppState>,
@@ -545,6 +664,30 @@ async fn list_skills() -> Json<Vec<SkillSummary>> {
             })
             .collect(),
     )
+}
+
+/// Skill 详情（含 Markdown 正文）。
+#[derive(Serialize)]
+struct SkillDetail {
+    /// Skill 名称。
+    name: String,
+    /// 描述。
+    description: String,
+    /// 源文件路径。
+    file_path: String,
+    /// SKILL.md 正文。
+    content: String,
+}
+
+/// `GET /skills/{name}` — 获取单个 Skill 的完整内容。
+async fn get_skill(Path(name): Path<String>) -> Result<Json<SkillDetail>, ApiError> {
+    let skill = SkillLoader::get(&name, None).ok_or_else(|| MacoError::not_found("skill"))?;
+    Ok(Json(SkillDetail {
+        name: skill.name,
+        description: skill.description,
+        file_path: skill.file_path.display().to_string(),
+        content: skill.content,
+    }))
 }
 
 /// `GET /usage/summary` 的 query 参数。
@@ -759,6 +902,265 @@ async fn revoke_token(
         return Err(MacoError::not_found("token").into());
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST/PATCH /mcp/servers` 请求体。
+#[derive(Deserialize)]
+struct McpServerUpsertBody {
+    /// 唯一服务名。
+    name: String,
+    /// 传输类型：`stdio` 或 `sse`。
+    transport: String,
+    /// stdio 命令（stdio 必填）。
+    command: Option<String>,
+    /// 命令参数 JSON 数组，默认 `[]`。
+    #[serde(default)]
+    args: Option<String>,
+    /// SSE URL（sse 必填）。
+    url: Option<String>,
+    /// 环境变量 JSON 对象，默认 `{}`。
+    #[serde(default)]
+    env: Option<String>,
+    /// 是否启用（PATCH 时可选）。
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+/// `GET /mcp/servers` — 列出全部 MCP 服务配置。
+async fn list_mcp_servers(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<McpServerRecord>>, ApiError> {
+    Ok(Json(state.mcp_servers.list().await?))
+}
+
+/// `POST /mcp/servers` — 创建 MCP 服务配置并重载连接池。
+async fn create_mcp_server(
+    State(state): State<AppState>,
+    Json(body): Json<McpServerUpsertBody>,
+) -> Result<Json<McpServerRecord>, ApiError> {
+    validate_mcp_body(&body)?;
+    let args = body.args.unwrap_or_else(|| "[]".into());
+    let env = body.env.unwrap_or_else(|| "{}".into());
+    let rec = state
+        .mcp_servers
+        .insert(
+            body.name.trim(),
+            body.transport.trim(),
+            body.command.as_deref(),
+            &args,
+            body.url.as_deref(),
+            &env,
+        )
+        .await?;
+    if let Err(e) = state.mcp_pool.reload().await {
+        tracing::warn!("mcp reload after create: {e}");
+    }
+    Ok(Json(rec))
+}
+
+/// `PATCH /mcp/servers/{id}` — 更新 MCP 配置并重载连接池。
+async fn update_mcp_server(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<McpServerUpsertBody>,
+) -> Result<Json<McpServerRecord>, ApiError> {
+    validate_mcp_body(&body)?;
+    let existing = state
+        .mcp_servers
+        .get(&id)
+        .await?
+        .ok_or_else(|| MacoError::not_found("mcp server"))?;
+    let args = body.args.unwrap_or(existing.args);
+    let env = body.env.unwrap_or(existing.env);
+    let enabled = body.enabled.unwrap_or(existing.enabled != 0);
+    state
+        .mcp_servers
+        .update(
+            &id,
+            body.name.trim(),
+            body.transport.trim(),
+            body.command.as_deref(),
+            &args,
+            body.url.as_deref(),
+            &env,
+            enabled,
+        )
+        .await?;
+    if let Err(e) = state.mcp_pool.reload().await {
+        tracing::warn!("mcp reload after update: {e}");
+    }
+    state
+        .mcp_servers
+        .get(&id)
+        .await?
+        .ok_or_else(|| MacoError::not_found("mcp server"))
+        .map(Json)
+        .map_err(Into::into)
+}
+
+/// `DELETE /mcp/servers/{id}` — 删除 MCP 配置并重载连接池。
+async fn delete_mcp_server(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if !state.mcp_servers.delete(&id).await? {
+        return Err(MacoError::not_found("mcp server").into());
+    }
+    if let Err(e) = state.mcp_pool.reload().await {
+        tracing::warn!("mcp reload after delete: {e}");
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /mcp/reload` — 从 DB 重载 MCP 连接池。
+async fn reload_mcp_pool(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    state.mcp_pool.reload().await?;
+    let names = state.mcp_pool.status_summary().await;
+    Ok(Json(serde_json::json!({ "reloaded": true, "servers": names })))
+}
+
+fn validate_mcp_body(body: &McpServerUpsertBody) -> Result<(), MacoError> {
+    if body.name.trim().is_empty() {
+        return Err(MacoError::config("name required"));
+    }
+    match body.transport.trim() {
+        "stdio" => {
+            if body
+                .command
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+            {
+                return Err(MacoError::config("stdio transport requires command"));
+            }
+        }
+        "sse" => {
+            if body
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+            {
+                return Err(MacoError::config("sse transport requires url"));
+            }
+        }
+        other => return Err(MacoError::config(format!("unsupported transport: {other}"))),
+    }
+    Ok(())
+}
+
+/// `POST/PATCH /tool-policies` 请求体。
+#[derive(Deserialize)]
+struct ToolPolicyUpsertBody {
+    /// 工具名匹配模式（支持 `*` 通配）。
+    tool_pattern: String,
+    /// 来源：`tool` / `mcp` / `builtin`。
+    source_type: String,
+    /// 动作：`allow` / `confirm` / `deny`。
+    action: String,
+    /// 是否启用（PATCH 时可选）。
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+async fn reload_harness_policies(state: &AppState) -> Result<(), MacoError> {
+    let policies = state.tool_policies.list_enabled().await?;
+    state.harness.set_tool_policies(policies).await;
+    Ok(())
+}
+
+fn validate_policy_body(body: &ToolPolicyUpsertBody) -> Result<(), MacoError> {
+    if body.tool_pattern.trim().is_empty() {
+        return Err(MacoError::config("tool_pattern required"));
+    }
+    if body.source_type.trim().is_empty() {
+        return Err(MacoError::config("source_type required"));
+    }
+    match body.action.trim() {
+        "allow" | "confirm" | "deny" => Ok(()),
+        other => Err(MacoError::config(format!("invalid action: {other}"))),
+    }
+}
+
+/// `GET /tool-policies` — 列出全部 HITL 工具策略。
+async fn list_tool_policies(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<maco_db::ToolPolicyRecord>>, ApiError> {
+    Ok(Json(state.tool_policies.list().await?))
+}
+
+/// `POST /tool-policies` — 新增策略并热更新 Harness。
+async fn create_tool_policy(
+    State(state): State<AppState>,
+    Json(body): Json<ToolPolicyUpsertBody>,
+) -> Result<Json<maco_db::ToolPolicyRecord>, ApiError> {
+    validate_policy_body(&body)?;
+    let rec = state
+        .tool_policies
+        .insert(
+            body.tool_pattern.trim(),
+            body.source_type.trim(),
+            body.action.trim(),
+        )
+        .await?;
+    reload_harness_policies(&state).await?;
+    Ok(Json(rec))
+}
+
+/// `PATCH /tool-policies/{id}` — 更新策略并热更新 Harness。
+async fn update_tool_policy(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ToolPolicyUpsertBody>,
+) -> Result<Json<maco_db::ToolPolicyRecord>, ApiError> {
+    validate_policy_body(&body)?;
+    let existing = state
+        .tool_policies
+        .get(&id)
+        .await?
+        .ok_or_else(|| MacoError::not_found("tool policy"))?;
+    let enabled = body.enabled.unwrap_or(existing.enabled != 0);
+    state
+        .tool_policies
+        .update(
+            &id,
+            body.tool_pattern.trim(),
+            body.source_type.trim(),
+            body.action.trim(),
+            enabled,
+        )
+        .await?;
+    reload_harness_policies(&state).await?;
+    state
+        .tool_policies
+        .get(&id)
+        .await?
+        .ok_or_else(|| MacoError::not_found("tool policy"))
+        .map(Json)
+        .map_err(Into::into)
+}
+
+/// `DELETE /tool-policies/{id}` — 删除策略并热更新 Harness。
+async fn delete_tool_policy(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if !state.tool_policies.delete(&id).await? {
+        return Err(MacoError::not_found("tool policy").into());
+    }
+    reload_harness_policies(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /tool-policies/reload` — 从 DB 重载策略到 Harness。
+async fn reload_tool_policies(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    reload_harness_policies(&state).await?;
+    let count = state.tool_policies.list_enabled().await?.len();
+    Ok(Json(serde_json::json!({ "reloaded": true, "enabled_count": count })))
 }
 
 /// Skill 扫描结果摘要（`GET /skills` 响应项）。

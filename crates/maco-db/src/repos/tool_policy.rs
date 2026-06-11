@@ -31,6 +31,16 @@ impl ToolPolicyRepo {
         Self { pool }
     }
 
+    pub async fn list(&self) -> MacoResult<Vec<ToolPolicyRecord>> {
+        sqlx::query_as::<_, ToolPolicyRecord>(
+            "SELECT id, tool_pattern, source_type, action, enabled, created_at
+             FROM maco_tool_policies ORDER BY created_at",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| MacoError::database(e.to_string()))
+    }
+
     pub async fn list_enabled(&self) -> MacoResult<Vec<ToolPolicyRecord>> {
         sqlx::query_as::<_, ToolPolicyRecord>(
             "SELECT id, tool_pattern, source_type, action, enabled, created_at
@@ -39,6 +49,74 @@ impl ToolPolicyRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| MacoError::database(e.to_string()))
+    }
+
+    pub async fn get(&self, id: &str) -> MacoResult<Option<ToolPolicyRecord>> {
+        sqlx::query_as::<_, ToolPolicyRecord>(
+            "SELECT id, tool_pattern, source_type, action, enabled, created_at
+             FROM maco_tool_policies WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| MacoError::database(e.to_string()))
+    }
+
+    pub async fn insert(
+        &self,
+        tool_pattern: &str,
+        source_type: &str,
+        action: &str,
+    ) -> MacoResult<ToolPolicyRecord> {
+        let id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO maco_tool_policies (id, tool_pattern, source_type, action, enabled, created_at)
+             VALUES (?, ?, ?, ?, 1, ?)",
+        )
+        .bind(&id)
+        .bind(tool_pattern)
+        .bind(source_type)
+        .bind(action)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| MacoError::database(e.to_string()))?;
+        self.get(&id)
+            .await?
+            .ok_or_else(|| MacoError::database("policy missing after insert"))
+    }
+
+    pub async fn update(
+        &self,
+        id: &str,
+        tool_pattern: &str,
+        source_type: &str,
+        action: &str,
+        enabled: bool,
+    ) -> MacoResult<()> {
+        sqlx::query(
+            "UPDATE maco_tool_policies SET tool_pattern = ?, source_type = ?, action = ?, enabled = ?
+             WHERE id = ?",
+        )
+        .bind(tool_pattern)
+        .bind(source_type)
+        .bind(action)
+        .bind(if enabled { 1 } else { 0 })
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| MacoError::database(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn delete(&self, id: &str) -> MacoResult<bool> {
+        let r = sqlx::query("DELETE FROM maco_tool_policies WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| MacoError::database(e.to_string()))?;
+        Ok(r.rows_affected() > 0)
     }
 
     pub async fn upsert_seed(

@@ -1,5 +1,25 @@
 const API = "/api";
 const TOKEN_KEY = "maco_api_token";
+const LAST_SESSION_KEY = "maco_last_session";
+const LAST_MODEL_KEY = "maco_last_model";
+
+export function getLastSessionId(): string | null {
+  return localStorage.getItem(LAST_SESSION_KEY);
+}
+
+export function setLastSessionId(id: string | null) {
+  if (id) localStorage.setItem(LAST_SESSION_KEY, id);
+  else localStorage.removeItem(LAST_SESSION_KEY);
+}
+
+export function getLastModelId(): string | null {
+  return localStorage.getItem(LAST_MODEL_KEY);
+}
+
+export function setLastModelId(id: string | null) {
+  if (id) localStorage.setItem(LAST_MODEL_KEY, id);
+  else localStorage.removeItem(LAST_MODEL_KEY);
+}
 
 export type ModelView = {
   id: string;
@@ -128,6 +148,7 @@ export async function streamChat(
   message: string,
   onEvent: (data: Record<string, unknown>) => void,
   modelId?: string,
+  signal?: AbortSignal,
 ) {
   const res = await fetch(`${API}/chat`, {
     method: "POST",
@@ -137,6 +158,7 @@ export async function streamChat(
       message,
       model_id: modelId,
     }),
+    signal,
   });
   await consumeSse(res, onEvent);
 }
@@ -282,4 +304,347 @@ export async function patchTodo(
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+
+export type SessionMeta = {
+  session_id: string;
+  title: string | null;
+  model_id: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type McpServerRecord = {
+  id: string;
+  name: string;
+  transport: "stdio" | "sse";
+  command: string | null;
+  args: string;
+  url: string | null;
+  env: string;
+  enabled: number;
+};
+
+export type ApiTokenListItem = {
+  id: string;
+  name: string;
+  scopes: string;
+  expires_at: string | null;
+  created_at: string;
+};
+
+export async function listSessions() {
+  const res = await fetch(`${API}/sessions`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<SessionMeta[]>;
+}
+
+export async function searchMemory(q: string) {
+  const res = await fetch(`${API}/memory/search?q=${encodeURIComponent(q)}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<{
+    search_mode: string;
+    results: Array<{ content: string; score?: number | null }>;
+  }>;
+}
+
+export async function uploadArtifact(sessionId: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const headers: Record<string, string> = {};
+  const token = getApiToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(`${API}/sessions/${sessionId}/artifacts`, {
+    method: "POST",
+    headers,
+    body: form,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<ArtifactRecord>;
+}
+
+export async function listApiTokens() {
+  const res = await fetch(`${API}/auth/tokens`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<ApiTokenListItem[]>;
+}
+
+export async function revokeApiToken(id: string) {
+  const res = await fetch(`${API}/auth/tokens/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function interruptChat(sessionId: string) {
+  const res = await fetch(`${API}/chat/${sessionId}/interrupt`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<{
+    session_id: string;
+    interrupted: boolean;
+    run_id: string | null;
+  }>;
+}
+
+export async function fetchActiveRun(sessionId: string) {
+  const res = await fetch(`${API}/sessions/${sessionId}/runs/active`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<{ session_id: string; run_id: string | null }>;
+}
+
+export async function streamRun(
+  sessionId: string,
+  runId: string,
+  onEvent: (data: Record<string, unknown>) => void,
+) {
+  const res = await fetch(`${API}/sessions/${sessionId}/runs/${runId}/stream`, {
+    headers: authHeaders(),
+  });
+  await consumeSse(res, onEvent);
+}
+
+export async function listMcpServers() {
+  const res = await fetch(`${API}/mcp/servers`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<McpServerRecord[]>;
+}
+
+export async function createMcpServer(body: {
+  name: string;
+  transport: string;
+  command?: string;
+  args?: string;
+  url?: string;
+  env?: string;
+}) {
+  const res = await fetch(`${API}/mcp/servers`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<McpServerRecord>;
+}
+
+export async function updateMcpServer(
+  id: string,
+  body: {
+    name: string;
+    transport: string;
+    command?: string;
+    args?: string;
+    url?: string;
+    env?: string;
+    enabled?: boolean;
+  },
+) {
+  const res = await fetch(`${API}/mcp/servers/${id}`, {
+    method: "PATCH",
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<McpServerRecord>;
+}
+
+export async function deleteMcpServer(id: string) {
+  const res = await fetch(`${API}/mcp/servers/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function reloadMcpPool() {
+  const res = await fetch(`${API}/mcp/reload`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<{ reloaded: boolean; servers: string[] }>;
+}
+
+export async function fetchSessionMessages(sessionId: string) {
+  const res = await fetch(`${API}/sessions/${sessionId}/messages`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<{
+    messages: Array<{ role: "user" | "assistant"; content: string }>;
+  }>;
+}
+
+export async function deleteSession(sessionId: string) {
+  const res = await fetch(`${API}/sessions/${sessionId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function updateSession(
+  sessionId: string,
+  body: { title?: string; model_id?: string },
+) {
+  const res = await fetch(`${API}/sessions/${sessionId}`, {
+    method: "PATCH",
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export type SkillSummary = {
+  name: string;
+  description: string;
+  file_path: string;
+};
+
+export type ArtifactRecord = {
+  id: string;
+  session_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  created_at: string;
+};
+
+export async function fetchSkills() {
+  const res = await fetch(`${API}/skills`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<SkillSummary[]>;
+}
+
+export async function fetchSkill(name: string) {
+  const res = await fetch(`${API}/skills/${encodeURIComponent(name)}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<SkillSummary & { content: string }>;
+}
+
+export async function listArtifacts(sessionId: string) {
+  const res = await fetch(`${API}/sessions/${sessionId}/artifacts`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<ArtifactRecord[]>;
+}
+
+export async function downloadArtifact(
+  sessionId: string,
+  artifactId: string,
+  filename: string,
+) {
+  const headers: Record<string, string> = {};
+  const token = getApiToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(
+    `${API}/sessions/${sessionId}/artifacts/${artifactId}`,
+    { headers },
+  );
+  if (!res.ok) throw new Error(await res.text());
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export type ToolPolicyRecord = {
+  id: string;
+  tool_pattern: string;
+  source_type: string;
+  action: string;
+  enabled: number;
+  created_at: string;
+};
+
+export type RunStatus = {
+  id: string;
+  session_id: string;
+  status: string;
+  last_seq: number;
+  pending_tools: Array<{ name: string; call_id: string }>;
+  pending_elicitations: Array<{
+    id: string;
+    request_type: string;
+    message: string;
+    url?: string;
+  }>;
+  error_message: string | null;
+};
+
+export async function fetchRun(sessionId: string, runId: string) {
+  const res = await fetch(`${API}/sessions/${sessionId}/runs/${runId}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<RunStatus>;
+}
+
+export async function listToolPolicies() {
+  const res = await fetch(`${API}/tool-policies`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<ToolPolicyRecord[]>;
+}
+
+export async function createToolPolicy(body: {
+  tool_pattern: string;
+  source_type: string;
+  action: string;
+}) {
+  const res = await fetch(`${API}/tool-policies`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<ToolPolicyRecord>;
+}
+
+export async function updateToolPolicy(
+  id: string,
+  body: {
+    tool_pattern: string;
+    source_type: string;
+    action: string;
+    enabled?: boolean;
+  },
+) {
+  const res = await fetch(`${API}/tool-policies/${id}`, {
+    method: "PATCH",
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<ToolPolicyRecord>;
+}
+
+export async function deleteToolPolicy(id: string) {
+  const res = await fetch(`${API}/tool-policies/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function reloadToolPolicies() {
+  const res = await fetch(`${API}/tool-policies/reload`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<{ reloaded: boolean; enabled_count: number }>;
 }

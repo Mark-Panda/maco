@@ -214,3 +214,19 @@ pub struct MemoryListResponse {
     /// Memory 条目列表。
     pub items: Vec<MemoryListItem>,
 }
+
+/// 聊天 UI 展示用的单条消息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    /// 角色：`user` 或 `assistant`。
+    pub role: String,
+    /// 消息正文。
+    pub content: String,
+}
+
+/// `GET /sessions/{id}/messages` 响应体。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMessagesResponse {
+    /// 按时间顺序排列的消息列表。
+    pub messages: Vec<ChatMessage>,
+}

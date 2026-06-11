@@ -8,6 +8,7 @@ use maco_governance::{resolve_action, PolicyAction};
 use tokio::sync::mpsc;
 
 use crate::orchestrator::RunOrchestrator;
+use crate::run_stream::RunStreamRegistry;
 
 /// 工具执行前的策略闸门，命中 `confirm` 时挂起 Run 并推送 SSE 确认事件。
 pub struct HitlGate {
@@ -21,6 +22,8 @@ pub struct HitlGate {
     pub policies: Vec<ToolPolicyRecord>,
     /// SSE 推送通道（通知前端待审批工具）。
     pub sse_tx: Option<mpsc::Sender<SseEnvelope>>,
+    /// 广播注册表（SSE 重连）。
+    pub stream: Option<RunStreamRegistry>,
 }
 
 impl HitlGate {
@@ -32,7 +35,12 @@ impl HitlGate {
         tool_args: &serde_json::Value,
         call_id: &str,
     ) -> AdkResult<Option<Content>> {
-        match resolve_action(&self.policies, source_type, tool_name) {
+        let (policy_source, policy_tool) = if let Some((_, short)) = tool_name.split_once("__") {
+            ("mcp", short)
+        } else {
+            (source_type, tool_name)
+        };
+        match resolve_action(&self.policies, policy_source, policy_tool) {
             PolicyAction::Allow => Ok(None),
             PolicyAction::Deny => Ok(Some(denied_content(tool_name, call_id, "tool denied by policy"))),
             PolicyAction::Confirm => {
@@ -56,21 +64,23 @@ impl HitlGate {
                     .await
                     .map_err(|e| adk_core::AdkError::config(e.to_string()))?;
 
+                let seq = self.orchestrator.next_seq(&self.run_id).await.unwrap_or(0);
+                let env = SseEnvelope {
+                    event_type: "tool_confirm_request".into(),
+                    run_id: self.run_id.clone(),
+                    seq,
+                    payload: serde_json::json!({
+                        "tool_name": tool_name,
+                        "args": tool_args,
+                        "call_id": call_id,
+                        "status": RUN_STATUS_AWAITING_USER,
+                    }),
+                };
                 if let Some(tx) = &self.sse_tx {
-                    let seq = self.orchestrator.next_seq(&self.run_id).await.unwrap_or(0);
-                    let _ = tx
-                        .send(SseEnvelope {
-                            event_type: "tool_confirm_request".into(),
-                            run_id: self.run_id.clone(),
-                            seq,
-                            payload: serde_json::json!({
-                                "tool_name": tool_name,
-                                "args": tool_args,
-                                "call_id": call_id,
-                                "status": RUN_STATUS_AWAITING_USER,
-                            }),
-                        })
-                        .await;
+                    let _ = tx.send(env.clone()).await;
+                }
+                if let Some(reg) = &self.stream {
+                    reg.publish(&self.session_id, env).await;
                 }
 
                 Ok(Some(pending_content(tool_name, call_id)))
