@@ -1,0 +1,62 @@
+# maco 本地 / 单机部署
+#
+# 启动：
+#   cp .env.example .env   # 填入 OPENAI_API_KEY 或 ANTHROPIC_API_KEY
+#   docker compose up -d --build
+#
+# 访问：
+#   Web UI:  http://localhost:3000
+#   API:     http://localhost:8080/api/health
+#   OpenAPI: http://localhost:8080/api/docs
+#
+# 说明：
+# - 数据持久化在卷 maco-data（SQLite + artifacts + skills）
+# - 容器内 Agent 的 bash / 文件工具可用；本机文件夹选择器在 Docker 中不可用
+# - 如需让 Agent 读写宿主机项目，取消 workspace 挂载注释
+
+name: maco
+
+services:
+  maco:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # deb.debian.org 502 时可改为 mirrors.aliyun.com 或 mirrors.ustc.edu.cn
+        APT_MIRROR: ${APT_MIRROR:-}
+    container_name: maco-server
+    restart: unless-stopped
+    ports:
+      - "${MACO_API_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      HOME: /home/maco
+      MACO_BIND_EXPLICIT: "1"
+      RUST_LOG: ${RUST_LOG:-maco=info}
+    volumes:
+      - maco-data:/home/maco/.maco
+      # 挂载宿主机目录供 Agent 绑定 project_root（示例）：
+      # - ${MACO_WORKSPACE:-./workspace}:/workspace:rw
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: maco-web
+    restart: unless-stopped
+    ports:
+      - "${MACO_WEB_PORT:-3000}:80"
+    depends_on:
+      maco:
+        condition: service_healthy
+
+volumes:
+  maco-data:
+    name: maco-data
