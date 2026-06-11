@@ -1,0 +1,14 @@
+[package]
+name = "maco-react"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+maco-core = { workspace = true }
+maco-db = { workspace = true }
+adk-core = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

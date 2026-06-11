@@ -1,0 +1,21 @@
+[package]
+name = "maco-storage"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+maco-core = { workspace = true }
+maco-db = { workspace = true }
+maco-governance = { workspace = true }
+adk-session = { workspace = true }
+adk-memory = { workspace = true }
+adk-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+sqlx = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "maco-telemetry"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+maco-core = { workspace = true }
+maco-db = { workspace = true }
+adk-rust = { workspace = true }
+adk-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }

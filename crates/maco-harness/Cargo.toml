@@ -1,0 +1,40 @@
+[package]
+name = "maco-harness"
+edition.workspace = true
+version.workspace = true
+
+[[example]]
+name = "run_spike"
+path = "examples/run_spike.rs"
+
+[dependencies]
+maco-core = { workspace = true }
+maco-db = { workspace = true }
+maco-storage = { workspace = true }
+maco-react = { workspace = true }
+maco-governance = { workspace = true }
+maco-telemetry = { workspace = true }
+adk-rust = { workspace = true }
+adk-agent = { version = "=1.0.0", features = ["guardrails"] }
+adk-session = { workspace = true }
+adk-memory = { workspace = true }
+adk-runner = { workspace = true }
+adk-core = { workspace = true }
+adk-tool = { workspace = true }
+rmcp = { version = "1.6", default-features = false, features = ["client"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+glob = { workspace = true }
+tempfile = "3"
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tracing-subscriber = { workspace = true }
