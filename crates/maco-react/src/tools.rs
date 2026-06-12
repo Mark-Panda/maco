@@ -62,15 +62,27 @@ impl Tool for UpdatePlanTool {
             .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let session_id = ctx.session_id();
         let plan = self
             .repo
-            .upsert_plan(ctx.session_id(), content, None)
+            .upsert_plan(session_id, content, None)
             .await
             .map_err(|e| {
                 adk_core::AdkError::new(
                     adk_core::ErrorComponent::Tool,
                     adk_core::ErrorCategory::Internal,
                     "maco.react.update_plan",
+                    e.to_string(),
+                )
+            })?;
+        self.repo
+            .sync_todo_status_from_plan(session_id, content)
+            .await
+            .map_err(|e| {
+                adk_core::AdkError::new(
+                    adk_core::ErrorComponent::Tool,
+                    adk_core::ErrorCategory::Internal,
+                    "maco.react.sync_todos",
                     e.to_string(),
                 )
             })?;
@@ -95,7 +107,7 @@ impl Tool for UpsertTodoTool {
     }
 
     fn description(&self) -> &str {
-        "Create or update a todo item for the session."
+        "Create or update a todo item. Set status to in_progress when starting a step and completed when done."
     }
 
     fn parameters_schema(&self) -> Option<Value> {
@@ -104,7 +116,12 @@ impl Tool for UpsertTodoTool {
             "properties": {
                 "task_key": { "type": "string", "description": "Stable todo identifier" },
                 "title": { "type": "string", "description": "Human-readable title" },
-                "sort_order": { "type": "integer", "description": "Display order", "default": 0 }
+                "sort_order": { "type": "integer", "description": "Display order", "default": 0 },
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "in_progress", "completed"],
+                    "description": "Todo status; update as work progresses"
+                }
             },
             "required": ["task_key", "title"]
         }))
@@ -120,9 +137,10 @@ impl Tool for UpsertTodoTool {
             .get("sort_order")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
+        let status = args.get("status").and_then(|v| v.as_str());
         let todo = self
             .repo
-            .upsert_todo(ctx.session_id(), task_key, title, sort_order)
+            .upsert_todo(ctx.session_id(), task_key, title, sort_order, status)
             .await
             .map_err(|e| {
                 adk_core::AdkError::new(

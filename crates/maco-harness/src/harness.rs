@@ -2,12 +2,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use adk_core::identity::{SessionId, UserId};
-use adk_core::{Content, Event, Part};
+use adk_core::{Content, Event, Part, Tool};
 use adk_rust::prelude::*;
+use adk_tool::SimpleToolContext;
 use futures::StreamExt;
 use maco_core::{
-    ensure_session_workspace, resolve_project_root, MacoError, MacoResult, ResumeContext,
-    SseEnvelope, RUN_STATUS_AWAITING_USER, APP_NAME, USER_ID,
+    ensure_session_workspace, resolve_project_root, MacoError, MacoResult, PendingToolCall,
+    ResumeContext, SseEnvelope, RUN_STATUS_AWAITING_USER, APP_NAME, USER_ID,
 };
 use maco_db::{
     CallbackLogRepo, ElicitationRepo, ModelRecord, ReactRepo, SessionMetaRepo, ToolPolicyRecord,
@@ -29,7 +30,7 @@ use crate::callbacks::{
 use crate::elicitation::{
     respond_to_elicitation, ElicitationBroker, ElicitationRunContext, MacoElicitationHandler,
 };
-use crate::hitl::{build_resume_content, HitlGate};
+use crate::hitl::{build_resume_content, build_tool_result_content, HitlBroker, HitlGate};
 use crate::mcp_pool::McpPool;
 use crate::model_factory::build_llm;
 use crate::orchestrator::RunOrchestrator;
@@ -37,6 +38,17 @@ use crate::run_stream::RunStreamRegistry;
 use crate::shell::MacoBashTool;
 use crate::skills::SkillLoader;
 use crate::usage::UsageContext;
+
+/// HITL 恢复结果：同 Run 内唤醒，或断线后新建 Run 并返回 SSE。
+pub enum ResumeHitlOutcome {
+    /// 已在原 Run 内继续，无需新 SSE 流。
+    InPlace,
+    /// 断线 fallback：新 Run 的事件流。
+    Stream {
+        run_id: String,
+        rx: mpsc::Receiver<SseEnvelope>,
+    },
+}
 
 /// Agent 编排入口：绑定存储、Run 状态机、回调日志与工具策略，驱动一次完整对话 Run。
 pub struct MacoHarness {
@@ -47,6 +59,7 @@ pub struct MacoHarness {
     usage: UsageRepo,
     elicitation: ElicitationRepo,
     elicitation_broker: ElicitationBroker,
+    hitl_broker: HitlBroker,
     tool_policies: Arc<RwLock<Vec<ToolPolicyRecord>>>,
     mcp_pool: Arc<McpPool>,
     run_streams: RunStreamRegistry,
@@ -78,6 +91,7 @@ impl MacoHarness {
             usage,
             elicitation,
             elicitation_broker: ElicitationBroker::new(),
+            hitl_broker: HitlBroker::new(),
             tool_policies: Arc::new(RwLock::new(tool_policies)),
             mcp_pool,
             run_streams,
@@ -169,7 +183,14 @@ impl MacoHarness {
         let scratch = scratch_dir.display();
         let mut instruction = format!(
             "You are maco, a helpful personal assistant. \
-             Use update_plan to maintain a markdown task plan and upsert_todo for actionable items.\n\n\
+             For multi-step tasks you MUST manage plan/todos incrementally — never defer to the end:\n\
+             1) At the START, call update_plan with an unchecked markdown checklist (`- [ ] step`).\n\
+             2) Immediately call upsert_todo for each step (status `pending`).\n\
+             3) Before starting a step, mark it `in_progress` via upsert_todo and update_plan (`- [~]`).\n\
+             4) After finishing a step, mark it `completed` via upsert_todo and update_plan (`- [x]`).\n\
+             Keep plan checkboxes and todo status in sync throughout the run.\n\
+             Reply in the same language as the user (if the user writes in Chinese, respond in Chinese). \
+             Do not mix languages in one reply except for code, paths, or technical terms.\n\n\
              Scratch directory (temp downloads, intermediates, throwaway scripts only): `{scratch}`\n\
              - Put temporary/scratch artifacts here — not user project source files.\n",
         );
@@ -213,7 +234,22 @@ impl MacoHarness {
         approved: bool,
         note: Option<&str>,
         model: &ModelRecord,
-    ) -> MacoResult<(String, mpsc::Receiver<SseEnvelope>)> {
+    ) -> MacoResult<ResumeHitlOutcome> {
+        if self.hitl_broker.fulfill(parent_run_id, approved).await {
+            return Ok(ResumeHitlOutcome::InPlace);
+        }
+        self.resume_run_fallback(session_id, parent_run_id, approved, note, model)
+            .await
+    }
+
+    async fn resume_run_fallback(
+        &self,
+        session_id: &str,
+        parent_run_id: &str,
+        approved: bool,
+        note: Option<&str>,
+        model: &ModelRecord,
+    ) -> MacoResult<ResumeHitlOutcome> {
         let parent = self
             .orchestrator
             .get_run(parent_run_id)
@@ -229,18 +265,45 @@ impl MacoHarness {
             .pending_tool_call
             .as_ref()
             .ok_or_else(|| MacoError::config("resume_context missing pending_tool_call"))?;
-        let content = build_resume_content(
-            &pending.name,
-            &pending.call_id,
-            approved,
-            note,
-        );
+        let content = if approved {
+            let result = self
+                .execute_pending_tool(session_id, pending)
+                .await?;
+            build_tool_result_content(&pending.name, &pending.call_id, result)
+        } else {
+            build_resume_content(&pending.name, &pending.call_id, false, note)
+        };
         let new_run = self
             .orchestrator
             .start_resumed_run(session_id, parent_run_id)
             .await?;
-        self.run_with_content(session_id, content, model, Some(new_run.id))
-            .await
+        let (run_id, rx) = self
+            .run_with_content(session_id, content, model, Some(new_run.id))
+            .await?;
+        Ok(ResumeHitlOutcome::Stream { run_id, rx })
+    }
+
+    async fn execute_pending_tool(
+        &self,
+        session_id: &str,
+        pending: &PendingToolCall,
+    ) -> MacoResult<serde_json::Value> {
+        let scratch_dir = ensure_session_workspace(&self.tmp_dir, session_id)?;
+        let project_root = self.session_project_root(session_id).await?;
+        if pending.name == "bash" {
+            let tool = MacoBashTool::new(scratch_dir, project_root);
+            return tool
+                .execute(
+                    Arc::new(SimpleToolContext::new(&pending.call_id)),
+                    pending.args.clone(),
+                )
+                .await
+                .map_err(|e| MacoError::Adk(e.to_string()));
+        }
+        Err(MacoError::conflict(format!(
+            "cannot execute tool `{}` after reconnect; start a new message",
+            pending.name
+        )))
     }
 
     async fn run_with_content(
@@ -290,6 +353,7 @@ impl MacoHarness {
             policies: self.tool_policies.read().await.clone(),
             sse_tx: Some(tx.clone()),
             stream: Some(streams.clone()),
+            broker: self.hitl_broker.clone(),
         });
         let usage_ctx = Arc::new(UsageContext {
             repo: self.usage.clone(),
@@ -371,26 +435,13 @@ impl MacoHarness {
         tokio::spawn(async move {
             let run_id = run_id_for_task;
             let mut ok = true;
+            let mut last_emitted_text = String::new();
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(event) => {
                         if let Ok(seq) = orchestrator.next_seq(&run_id).await {
-                            let text = redact_text(&extract_event_text(&event));
-                            if !text.is_empty() {
-                                publish_sse(
-                                    &streams_task,
-                                    &session_id_task,
-                                    &tx,
-                                    SseEnvelope {
-                                        event_type: "text".into(),
-                                        run_id: run_id.clone(),
-                                        seq,
-                                        payload: serde_json::json!({ "content": text }),
-                                    },
-                                )
-                                .await;
-                            }
                             if let Some(tool_ev) = extract_tool_event(&event) {
+                                last_emitted_text.clear();
                                 publish_sse(
                                     &streams_task,
                                     &session_id_task,
@@ -403,6 +454,25 @@ impl MacoHarness {
                                     },
                                 )
                                 .await;
+                            } else {
+                                let text = redact_text(&extract_event_text(&event));
+                                if !text.is_empty() {
+                                    let delta = compute_text_delta(&mut last_emitted_text, &text);
+                                    if !delta.is_empty() {
+                                        publish_sse(
+                                            &streams_task,
+                                            &session_id_task,
+                                            &tx,
+                                            SseEnvelope {
+                                                event_type: "text".into(),
+                                                run_id: run_id.clone(),
+                                                seq,
+                                                payload: serde_json::json!({ "content": delta }),
+                                            },
+                                        )
+                                        .await;
+                                    }
+                                }
                             }
                         }
                     }
@@ -429,26 +499,43 @@ impl MacoHarness {
                 }
             }
             if ok {
+                let mut awaiting_user = false;
                 if let Ok(current) = orchestrator.get_run(&run_id).await {
                     if let Some(r) = current {
-                        if r.status != RUN_STATUS_AWAITING_USER {
+                        awaiting_user = r.status == RUN_STATUS_AWAITING_USER;
+                        if !awaiting_user {
                             let _ = orchestrator.complete_run(&run_id).await;
                         }
                     }
                 }
                 if let Ok(seq) = orchestrator.next_seq(&run_id).await {
-                    publish_sse(
-                        &streams_task,
-                        &session_id_task,
-                        &tx,
-                        SseEnvelope {
-                            event_type: "done".into(),
-                            run_id: run_id.clone(),
-                            seq,
-                            payload: serde_json::json!({}),
-                        },
-                    )
-                    .await;
+                    if awaiting_user {
+                        publish_sse(
+                            &streams_task,
+                            &session_id_task,
+                            &tx,
+                            SseEnvelope {
+                                event_type: "awaiting_user".into(),
+                                run_id: run_id.clone(),
+                                seq,
+                                payload: serde_json::json!({ "status": RUN_STATUS_AWAITING_USER }),
+                            },
+                        )
+                        .await;
+                    } else {
+                        publish_sse(
+                            &streams_task,
+                            &session_id_task,
+                            &tx,
+                            SseEnvelope {
+                                event_type: "done".into(),
+                                run_id: run_id.clone(),
+                                seq,
+                                payload: serde_json::json!({}),
+                            },
+                        )
+                        .await;
+                    }
                 }
             }
             streams_task.unregister(&session_id_task).await;
@@ -485,16 +572,35 @@ fn agent_guardrails() -> GuardrailSet {
     set
 }
 
+fn compute_text_delta(last_emitted: &mut String, text: &str) -> String {
+    if text.starts_with(last_emitted.as_str()) {
+        let delta = text[last_emitted.len()..].to_string();
+        *last_emitted = text.to_string();
+        return delta;
+    }
+    if last_emitted.starts_with(text) {
+        *last_emitted = text.to_string();
+        return String::new();
+    }
+    let delta = text.to_string();
+    *last_emitted = text.to_string();
+    delta
+}
+
 fn extract_event_text(event: &Event) -> String {
     event
         .llm_response
         .content
         .as_ref()
         .map(|c| {
+            if c.parts.iter().any(|p| matches!(p, Part::FunctionCall { .. })) {
+                return String::new();
+            }
             c.parts
                 .iter()
                 .filter_map(|p| match p {
                     Part::Text { text } => Some(text.as_str()),
+                    Part::Thinking { .. } => None,
                     _ => None,
                 })
                 .collect::<Vec<_>>()

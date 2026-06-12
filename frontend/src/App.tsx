@@ -29,7 +29,6 @@ import {
   type JobRecord,
   type ModelView,
   type SessionMeta,
-  patchTodo,
   pickProjectDirectory,
   respondElicitation,
   resumeRun,
@@ -44,12 +43,17 @@ import {
 import { MacoIcon, type MacoIconName } from "./components/Icons";
 import { McpSettings } from "./components/McpSettings";
 import { ModelSettings } from "./components/ModelSettings";
+import { ChatMessagesPanel } from "./components/ChatMessagesPanel";
+import { ElicitationModal } from "./components/ElicitationModal";
+import { HitlConfirmModal } from "./components/HitlConfirmModal";
+import { RunStatusBar } from "./components/RunStatusBar";
 import { SessionProjectBar } from "./components/SessionProjectBar";
 import { TasksDock } from "./components/TasksDock";
-import { ArtifactPreviewModal } from "./components/ArtifactPreviewModal";
+import { useTasksDockWidth } from "./hooks/useTasksDockWidth";
 import { SkillsPanel } from "./components/SkillsPanel";
 import { ToolPolicySettings } from "./components/ToolPolicySettings";
-import { useChatStore, type Message } from "./store/chat";
+import { useStreamingAssistantBuffer } from "./hooks/useStreamingAssistantBuffer";
+import { useChatStore } from "./store/chat";
 import { applyTheme, getTheme, type Theme, toggleTheme as flipTheme } from "./theme";
 
 type SseEvent = {
@@ -59,6 +63,8 @@ type SseEvent = {
     content?: string;
     message?: string;
     tool_name?: string;
+    name?: string;
+    args?: Record<string, unknown>;
     elicitation_id?: string;
     request_type?: string;
     url?: string;
@@ -75,19 +81,25 @@ type AppView = "chat" | ToolTab;
 export default function App() {
   const {
     sessionId,
-    messages,
     setSessionId,
     setMessages,
     pushMessage,
-    appendAssistant,
+    dropAssistantTurnBeforeTool,
     reset,
     clearMessages,
   } = useChatStore();
+  const { appendChunk, flush: flushAssistantStream } = useStreamingAssistantBuffer();
   const [input, setInput] = useState("");
   const [plan, setPlan] = useState("");
   const [todos, setTodos] = useState<Array<{ task_key: string; title: string; status: string }>>([]);
   const [loading, setLoading] = useState(false);
-  const [pendingConfirm, setPendingConfirm] = useState<{ runId: string; toolName: string } | null>(null);
+  const [confirmSubmitting, setConfirmSubmitting] = useState(false);
+  const [elicitationSubmitting, setElicitationSubmitting] = useState(false);
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    runId: string;
+    toolName: string;
+    toolArgs?: Record<string, unknown> | null;
+  } | null>(null);
   const [pendingElicitation, setPendingElicitation] = useState<{
     id: string;
     requestType: string;
@@ -102,6 +114,7 @@ export default function App() {
   const [models, setModels] = useState<ModelView[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [appView, setAppView] = useState<AppView>("chat");
+  const [agentActivity, setAgentActivity] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(getTheme);
 
   useEffect(() => {
@@ -114,6 +127,10 @@ export default function App() {
 
   function navigateTo(view: AppView) {
     setAppView(view);
+    if (view === "chat" && sessionId) {
+      refreshTasks(sessionId).catch(() => undefined);
+      listArtifacts(sessionId).then(setArtifacts).catch(() => setArtifacts([]));
+    }
   }
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [jobName, setJobName] = useState("");
@@ -131,12 +148,6 @@ export default function App() {
   const [artifacts, setArtifacts] = useState<
     Array<{ id: string; filename: string; mime_type: string; size_bytes: number }>
   >([]);
-  const [previewArtifactItem, setPreviewArtifactItem] = useState<{
-    id: string;
-    filename: string;
-    mime_type: string;
-    size_bytes: number;
-  } | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [projectRootDraft, setProjectRootDraft] = useState("");
@@ -144,8 +155,13 @@ export default function App() {
   const [restored, setRestored] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatAbortRef = useRef<AbortController | null>(null);
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const sessionIdRef = useRef<string | null>(sessionId);
 
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  const { width: tasksDockWidth, onResizeStart } = useTasksDockWidth();
   const defaultModel = models.find((m) => m.is_default) ?? models[0];
 
   useEffect(() => {
@@ -216,19 +232,27 @@ export default function App() {
       .catch(() => setJobs([]));
   }, [sessionId]);
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
-
   function handleSse(raw: Record<string, unknown>) {
     const ev = raw as SseEvent & { event_type?: string };
     const type = ev.type ?? ev.event_type;
+    const activeSessionId = sessionIdRef.current;
     if (ev.run_id) setActiveRunId(ev.run_id);
     if (type === "text" && ev.payload?.content) {
-      appendAssistant(ev.payload.content);
+      appendChunk(ev.payload.content);
+    }
+    if (type === "tool_call") {
+      const toolName = ev.payload?.name ?? "unknown";
+      dropAssistantTurnBeforeTool();
+      setAgentActivity(`正在调用工具：${toolName}`);
     }
     if (type === "tool_confirm_request" && ev.run_id && ev.payload?.tool_name) {
-      setPendingConfirm({ runId: ev.run_id, toolName: ev.payload.tool_name });
+      dropAssistantTurnBeforeTool();
+      setPendingConfirm({
+        runId: ev.run_id,
+        toolName: ev.payload.tool_name,
+        toolArgs: (ev.payload.args as Record<string, unknown> | undefined) ?? null,
+      });
+      setAgentActivity(`等待确认工具：${ev.payload.tool_name}`);
     }
     if (type === "elicitation_request" && ev.payload?.elicitation_id) {
       setPendingElicitation({
@@ -237,6 +261,16 @@ export default function App() {
         message: ev.payload.message ?? "需要补充输入",
         url: ev.payload.url,
       });
+      setAgentActivity("等待 MCP 补充输入");
+    }
+    if (type === "error" && ev.payload?.message) {
+      flushAssistantStream();
+      pushMessage({ role: "assistant", content: `错误：${ev.payload.message}` });
+      setLoading(false);
+      setAgentActivity(null);
+      setActiveRunId(null);
+      setPendingConfirm(null);
+      setPendingElicitation(null);
     }
     if (type === "artifact_created" && ev.payload?.id && ev.payload.filename) {
       const item = {
@@ -250,8 +284,24 @@ export default function App() {
         return [item, ...prev];
       });
     }
-    if (type === "done" && sessionId) {
-      listArtifacts(sessionId).then(setArtifacts).catch(() => undefined);
+    if (type === "tasks_updated" && activeSessionId) {
+      refreshTasks(activeSessionId).catch(() => undefined);
+    }
+    if (type === "awaiting_user") {
+      setLoading(true);
+      setAgentActivity("等待你的确认…");
+    }
+    if (type === "done") {
+      flushAssistantStream();
+      setActiveRunId(null);
+      setLoading(false);
+      setAgentActivity(null);
+      setPendingConfirm(null);
+      const sid = activeSessionId ?? sessionIdRef.current;
+      if (sid) {
+        refreshTasks(sid).catch(() => undefined);
+        listArtifacts(sid).then(setArtifacts).catch(() => undefined);
+      }
     }
   }
 
@@ -260,6 +310,7 @@ export default function App() {
     const modelId = selectedModelId || defaultModel?.id;
     const root = projectRootDraft.trim() || undefined;
     const s = await createSession(undefined, modelId, root);
+    sessionIdRef.current = s.session_id;
     setSessionId(s.session_id);
     setSessions(await listSessions());
     return s.session_id;
@@ -276,6 +327,7 @@ export default function App() {
     modelId?: string | null,
     projectRoot?: string | null,
   ) {
+    sessionIdRef.current = sid;
     setSessionId(sid);
     if (modelId) setSelectedModelId(modelId);
     setProjectRootDraft(projectRoot ?? "");
@@ -297,9 +349,11 @@ export default function App() {
         try {
           const run = await fetchRun(sid, active.run_id);
           if (run.pending_tools.length > 0) {
+            const tool = run.pending_tools[0];
             setPendingConfirm({
               runId: active.run_id,
-              toolName: run.pending_tools[0].name,
+              toolName: tool.name,
+              toolArgs: tool.args ?? null,
             });
           }
           if (run.pending_elicitations.length > 0) {
@@ -380,9 +434,10 @@ export default function App() {
       return;
     }
     setLoading(true);
+    setAgentActivity("思考中…");
     try {
       const sid = await ensureSession();
-      const isFirstMessage = messages.length === 0;
+      const isFirstMessage = useChatStore.getState().messages.length === 0;
       pushMessage({ role: "user", content: input });
       const text = input;
       setInput("");
@@ -400,9 +455,12 @@ export default function App() {
       setArtifacts(await listArtifacts(sid));
       listSessions().then(setSessions).catch(() => undefined);
     } catch (e) {
+      flushAssistantStream();
       pushMessage({ role: "assistant", content: String(e) });
     } finally {
+      flushAssistantStream();
       setLoading(false);
+      setAgentActivity(null);
     }
   }
 
@@ -414,8 +472,8 @@ export default function App() {
   }
 
   async function respondElicit(action: "accept" | "decline" | "cancel") {
-    if (!pendingElicitation || loading) return;
-    setLoading(true);
+    if (!pendingElicitation || elicitationSubmitting) return;
+    setElicitationSubmitting(true);
     try {
       let content: Record<string, unknown> | undefined;
       if (action === "accept") {
@@ -431,16 +489,19 @@ export default function App() {
     } catch (e) {
       pushMessage({ role: "assistant", content: String(e) });
     } finally {
-      setLoading(false);
+      setElicitationSubmitting(false);
     }
   }
 
   async function stopRun() {
-    if (!sessionId || !loading) return;
+    if (!sessionId) return;
+    if (!loading && !activeRunId && !pendingConfirm && !pendingElicitation) return;
     chatAbortRef.current?.abort();
     try {
       await interruptChat(sessionId);
       setActiveRunId(null);
+      setPendingConfirm(null);
+      setPendingElicitation(null);
     } catch (e) {
       pushMessage({ role: "assistant", content: String(e) });
     } finally {
@@ -449,16 +510,29 @@ export default function App() {
   }
 
   async function respondConfirm(approved: boolean) {
-    if (!sessionId || !pendingConfirm || loading) return;
-    setLoading(true);
+    if (!sessionId || !pendingConfirm || confirmSubmitting) return;
+    setConfirmSubmitting(true);
     try {
-      await resumeRun(sessionId, pendingConfirm.runId, approved, handleSse);
+      const mode = await resumeRun(
+        sessionId,
+        pendingConfirm.runId,
+        approved,
+        handleSse,
+      );
       setPendingConfirm(null);
-      await refreshTasks(sessionId);
+      setAgentActivity(approved ? "工具已批准，继续执行…" : null);
+      if (mode === "stream") {
+        setLoading(true);
+        await refreshTasks(sessionId);
+        setLoading(false);
+      }
     } catch (e) {
       pushMessage({ role: "assistant", content: String(e) });
-    } finally {
+      setPendingConfirm(null);
       setLoading(false);
+      setAgentActivity(null);
+    } finally {
+      setConfirmSubmitting(false);
     }
   }
 
@@ -498,6 +572,16 @@ export default function App() {
 
   const activeTool = toolbarItems.find((t) => t.id === appView) ?? toolbarItems[0];
 
+  const runNeedsAttention = Boolean(pendingConfirm || pendingElicitation);
+  const runInProgress = loading || Boolean(activeRunId);
+  const showRunActivity = runNeedsAttention || runInProgress;
+
+  const runStatusMessage = pendingConfirm
+    ? `工具待确认：${pendingConfirm.toolName}`
+    : pendingElicitation
+      ? "等待 MCP 补充输入"
+      : "Agent 正在运行…";
+
   return (
     <div className="app-shell">
       <nav className="app-toolbar-left" aria-label="工具栏">
@@ -511,6 +595,13 @@ export default function App() {
           >
             <span className="toolbar-tab-icon">
               <MacoIcon name={t.icon} size={18} />
+              {t.id === "chat" && showRunActivity && (
+                <span
+                  className={`toolbar-run-dot ${runNeedsAttention ? "warn" : "active"}`}
+                  title={runStatusMessage}
+                  aria-hidden
+                />
+              )}
             </span>
             <span className="toolbar-tab-label">{t.label}</span>
           </button>
@@ -518,8 +609,19 @@ export default function App() {
       </nav>
 
       <div className="app-workspace">
+        {appView !== "chat" && showRunActivity && (
+          <RunStatusBar
+            message={runStatusMessage}
+            onGoToChat={() => navigateTo("chat")}
+            onStop={() => void stopRun()}
+            stopping={loading}
+          />
+        )}
         {appView === "chat" ? (
-          <div className="chat-workspace">
+          <div
+            className="chat-workspace"
+            style={{ gridTemplateColumns: `minmax(0, 1fr) ${tasksDockWidth}px` }}
+          >
             <div className="chat-main">
         <header className="app-topbar">
           <div className="app-logo">ma<span>co</span></div>
@@ -671,82 +773,12 @@ export default function App() {
           onClear={clearProjectRoot}
         />
 
-        <div className="chat-scroll">
-          {messages.length === 0 ? (
-            <div className="chat-empty">
-              <h2>个人 Agent</h2>
-              <p>在「模型」工具中配置 API 后即可开始对话。</p>
-              {models.length === 0 && (
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() => navigateTo("models")}
-                >
-                  添加模型
-                </button>
-              )}
-            </div>
-          ) : (
-            messages.map((m: Message, i: number) => (
-              <div key={i} className={`msg msg-${m.role}`}>
-                <span className="msg-label">{m.role === "user" ? "你" : "助手"}</span>
-                <div className="msg-bubble">{m.content}</div>
-              </div>
-            ))
-          )}
-          {loading && (
-            <div className="msg msg-assistant">
-              <span className="msg-label">助手</span>
-              <div className="msg-bubble" style={{ opacity: 0.7 }}>
-                思考中…
-              </div>
-            </div>
-          )}
-          <div ref={chatEndRef} />
-        </div>
-
-        {pendingConfirm && (
-          <div className="alert alert-warn">
-            <strong>工具调用确认</strong>
-            <p style={{ margin: "6px 0 0" }}>{pendingConfirm.toolName}</p>
-            <div className="alert-actions">
-              <button type="button" className="btn btn-sm btn-primary" onClick={() => respondConfirm(true)} disabled={loading}>
-                批准
-              </button>
-              <button type="button" className="btn btn-sm" onClick={() => respondConfirm(false)} disabled={loading}>
-                拒绝
-              </button>
-            </div>
-          </div>
-        )}
-
-        {pendingElicitation && (
-          <div className="alert alert-info">
-            <strong>需要 MCP 输入</strong>
-            <p style={{ margin: "6px 0 0" }}>{pendingElicitation.message}</p>
-            {pendingElicitation.url && (
-              <a href={pendingElicitation.url} target="_blank" rel="noreferrer">
-                打开链接
-              </a>
-            )}
-            {pendingElicitation.requestType === "form" && (
-              <textarea
-                className="chat-input"
-                style={{ width: "100%", marginTop: 8, minHeight: 72 }}
-                value={elicitationInput}
-                onChange={(e) => setElicitationInput(e.target.value)}
-              />
-            )}
-            <div className="alert-actions">
-              <button type="button" className="btn btn-sm btn-primary" onClick={() => respondElicit("accept")} disabled={loading}>
-                提交
-              </button>
-              <button type="button" className="btn btn-sm" onClick={() => respondElicit("decline")} disabled={loading}>
-                拒绝
-              </button>
-            </div>
-          </div>
-        )}
+        <ChatMessagesPanel
+          loading={loading}
+          agentActivity={agentActivity}
+          modelsEmpty={models.length === 0}
+          onOpenModels={() => navigateTo("models")}
+        />
 
         <div className="chat-composer">
           <div className="chat-composer-inner">
@@ -801,18 +833,22 @@ export default function App() {
           </div>
         </div>
             </div>
-            <TasksDock
-              plan={plan}
-              todos={todos}
-              artifacts={artifacts}
-              sessionId={sessionId}
-              onPreviewArtifact={setPreviewArtifactItem}
-              onPatchTodo={async (taskKey, status) => {
-                if (!sessionId) return;
-                await patchTodo(sessionId, taskKey, status);
-                await refreshTasks(sessionId);
-              }}
-            />
+            <div className="tasks-dock-column">
+              <div
+                className="tasks-dock-resizer"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="调整任务面板宽度"
+                onMouseDown={onResizeStart}
+              />
+              <TasksDock
+                plan={plan}
+                todos={todos}
+                artifacts={artifacts}
+                sessionId={sessionId}
+                busy={loading || !!activeRunId}
+              />
+            </div>
           </div>
         ) : (
           <div className="tool-workspace">
@@ -1110,11 +1146,26 @@ export default function App() {
         )}
       </div>
 
-      {previewArtifactItem && sessionId && (
-        <ArtifactPreviewModal
-          sessionId={sessionId}
-          artifact={previewArtifactItem}
-          onClose={() => setPreviewArtifactItem(null)}
+      {pendingConfirm && (
+        <HitlConfirmModal
+          toolName={pendingConfirm.toolName}
+          toolArgs={pendingConfirm.toolArgs}
+          submitting={confirmSubmitting}
+          onApprove={() => void respondConfirm(true)}
+          onReject={() => void respondConfirm(false)}
+        />
+      )}
+
+      {pendingElicitation && (
+        <ElicitationModal
+          message={pendingElicitation.message}
+          requestType={pendingElicitation.requestType}
+          url={pendingElicitation.url}
+          input={elicitationInput}
+          submitting={elicitationSubmitting}
+          onInputChange={setElicitationInput}
+          onAccept={() => void respondElicit("accept")}
+          onDecline={() => void respondElicit("decline")}
         />
       )}
     </div>

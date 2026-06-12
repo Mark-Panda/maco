@@ -68,10 +68,94 @@ fn extract_write_paths(tool_name: &str, args: &Value) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for key in ["path", "file_path", "filepath", "target", "destination", "file"] {
         if let Some(s) = args.get(key).and_then(|v| v.as_str()) {
-            paths.push(PathBuf::from(s));
+            paths.push(expand_tilde(s));
         }
     }
     paths
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if path == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn extract_bash_output_paths(command: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for segment in command.split(|c| c == '|' || c == ';' || c == '&') {
+        let segment = segment.trim();
+        if let Some(idx) = segment.rfind(">>") {
+            if let Some(token) = segment[idx + 2..].split_whitespace().next() {
+                let token = token.trim_matches('"').trim_matches('\'');
+                if token != "/dev/null" {
+                    paths.push(expand_tilde(token));
+                }
+            }
+        } else if let Some(idx) = segment.rfind('>') {
+            if segment.as_bytes().get(idx.saturating_sub(1)) == Some(&b'=') {
+                continue;
+            }
+            if let Some(token) = segment[idx + 1..].split_whitespace().next() {
+                let token = token.trim_matches('"').trim_matches('\'');
+                if token != "/dev/null" {
+                    paths.push(expand_tilde(token));
+                }
+            }
+        }
+    }
+    for token in command.split_whitespace() {
+        let token = token.trim_matches('"').trim_matches('\'');
+        if (token.starts_with('/') || token.starts_with("~/"))
+            && token.contains('.')
+            && !token.starts_with("-")
+        {
+            paths.push(expand_tilde(token));
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn path_importable(
+    path: &Path,
+    scratch_dir: &Path,
+    project_root: Option<&Path>,
+    explicit_paths: &[PathBuf],
+) -> bool {
+    if path_allowed(path, scratch_dir, project_root) {
+        return true;
+    }
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    explicit_paths.iter().any(|explicit| {
+        explicit
+            .canonicalize()
+            .ok()
+            .map(|c| c == canonical)
+            .unwrap_or(false)
+    })
+}
+
+pub struct ArtifactCaptureState {
+    pub session_id: String,
+    pub run_id: String,
+    pub artifacts: Arc<ArtifactStore>,
+    pub scratch_dir: PathBuf,
+    pub project_root: Option<PathBuf>,
+    pub scratch_known: Arc<Mutex<HashSet<PathBuf>>>,
+    pub sse_tx: mpsc::Sender<SseEnvelope>,
+    pub streams: RunStreamRegistry,
+    pub orchestrator: RunOrchestrator,
 }
 
 fn path_allowed(path: &Path, scratch_dir: &Path, project_root: Option<&Path>) -> bool {
@@ -91,16 +175,17 @@ fn path_allowed(path: &Path, scratch_dir: &Path, project_root: Option<&Path>) ->
     false
 }
 
-pub struct ArtifactCaptureState {
-    pub session_id: String,
-    pub run_id: String,
-    pub artifacts: Arc<ArtifactStore>,
-    pub scratch_dir: PathBuf,
-    pub project_root: Option<PathBuf>,
-    pub scratch_known: Arc<Mutex<HashSet<PathBuf>>>,
-    pub sse_tx: mpsc::Sender<SseEnvelope>,
-    pub streams: RunStreamRegistry,
-    pub orchestrator: RunOrchestrator,
+async fn publish_tasks_updated(state: &ArtifactCaptureState) {
+    if let Ok(seq) = state.orchestrator.next_seq(&state.run_id).await {
+        let env = SseEnvelope {
+            event_type: "tasks_updated".into(),
+            run_id: state.run_id.clone(),
+            seq,
+            payload: serde_json::json!({}),
+        };
+        let _ = state.sse_tx.send(env.clone()).await;
+        state.streams.publish(&state.session_id, env).await;
+    }
 }
 
 async fn publish_artifact_created(state: &ArtifactCaptureState, record: &maco_db::ArtifactRecord) {
@@ -124,9 +209,15 @@ async fn publish_artifact_created(state: &ArtifactCaptureState, record: &maco_db
 async fn try_import_paths(
     state: &ArtifactCaptureState,
     paths: Vec<PathBuf>,
+    explicit_paths: &[PathBuf],
 ) -> MacoResult<()> {
     for path in paths {
-        if !path_allowed(&path, &state.scratch_dir, state.project_root.as_deref()) {
+        if !path_importable(
+            &path,
+            &state.scratch_dir,
+            state.project_root.as_deref(),
+            explicit_paths,
+        ) {
             continue;
         }
         if let Some(record) = state
@@ -168,12 +259,22 @@ pub fn after_tool_with_artifacts(
 
             let success = outcome.as_ref().map(|o| o.success).unwrap_or(false);
             if success {
-                let mut paths = extract_write_paths(tool_name, &args);
+                let mut explicit_paths = extract_write_paths(tool_name, &args);
+                let mut paths = explicit_paths.clone();
                 if tool_name == "bash" {
+                    if let Some(command) = args.get("command").and_then(|v| v.as_str()) {
+                        explicit_paths.extend(extract_bash_output_paths(command));
+                        paths.extend(extract_bash_output_paths(command));
+                    }
                     let mut known = capture.scratch_known.lock().await;
                     paths.extend(diff_new_scratch_files(&capture.scratch_dir, &mut known));
                 }
-                let _ = try_import_paths(&capture, paths).await;
+                explicit_paths.sort();
+                explicit_paths.dedup();
+                let _ = try_import_paths(&capture, paths, &explicit_paths).await;
+                if tool_name == "update_plan" || tool_name == "upsert_todo" {
+                    publish_tasks_updated(&capture).await;
+                }
             }
 
             Ok(None)
@@ -184,4 +285,17 @@ pub fn after_tool_with_artifacts(
 /// 文本预览截断上限（与 API 一致）。
 pub fn preview_text_limit() -> usize {
     PREVIEW_TEXT_LIMIT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_bash_output_paths_finds_redirect_and_tilde() {
+        let paths = extract_bash_output_paths(
+            "mkdir -p ~/Desktop/gomoku && cat > ~/Desktop/gomoku/index.html <<'EOF'",
+        );
+        assert!(paths.iter().any(|p| p.ends_with("Desktop/gomoku/index.html")));
+    }
 }

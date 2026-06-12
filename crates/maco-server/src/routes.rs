@@ -427,7 +427,7 @@ struct ResumeRunBody {
     model_id: Option<String>,
 }
 
-/// `POST /sessions/{id}/runs/{run_id}/resume` — HITL 批准后恢复 Run，SSE 流式返回。
+/// `POST /sessions/{id}/runs/{run_id}/resume` — HITL 批准后恢复 Run。
 async fn resume_run(
     State(state): State<AppState>,
     Path((session_id, run_id)): Path<(String, String)>,
@@ -438,7 +438,7 @@ async fn resume_run(
         .resolve_model(&state.models, &session_id, body.model_id.as_deref())
         .await?;
 
-    let (_new_run_id, rx) = state
+    match state
         .harness
         .resume_run(
             &session_id,
@@ -447,21 +447,30 @@ async fn resume_run(
             body.note.as_deref(),
             &model,
         )
-        .await?;
-
-    let stream = ReceiverStream::new(rx).map(|env| {
-        let data = serde_json::to_string(&env).unwrap_or_else(|_| "{}".into());
-        Ok::<_, std::convert::Infallible>(format!("data: {data}\n\n"))
-    });
-
-    Ok((
-        StatusCode::OK,
-        [
-            (axum::http::header::CONTENT_TYPE, "text/event-stream"),
-            (axum::http::header::CACHE_CONTROL, "no-cache"),
-        ],
-        axum::body::Body::from_stream(stream),
-    ))
+        .await?
+    {
+        maco_harness::ResumeHitlOutcome::InPlace => Ok((
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            Json(serde_json::json!({ "ok": true, "mode": "in_place" })),
+        )
+            .into_response()),
+        maco_harness::ResumeHitlOutcome::Stream { rx, .. } => {
+            let stream = ReceiverStream::new(rx).map(|env| {
+                let data = serde_json::to_string(&env).unwrap_or_else(|_| "{}".into());
+                Ok::<_, std::convert::Infallible>(format!("data: {data}\n\n"))
+            });
+            Ok((
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, "text/event-stream"),
+                    (axum::http::header::CACHE_CONTROL, "no-cache"),
+                ],
+                axum::body::Body::from_stream(stream),
+            )
+                .into_response())
+        }
+    }
 }
 
 /// `GET /sessions/{id}/plan` — 获取会话 ReAct 计划正文。
@@ -505,6 +514,12 @@ async fn list_todos(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<maco_db::TodoRecord>>, ApiError> {
+    if let Some(plan) = state.react.get_plan(&id).await? {
+        state
+            .react
+            .sync_todo_status_from_plan(&id, &plan.content)
+            .await?;
+    }
     Ok(Json(state.react.list_todos(&id).await?))
 }
 

@@ -31,6 +31,28 @@ export function persistSidebarWidth(width: number): void {
   localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clamped));
 }
 
+const TASKS_DOCK_WIDTH_KEY = "maco_tasks_dock_width";
+
+export const TASKS_DOCK_WIDTH_MIN = 380;
+export const TASKS_DOCK_WIDTH_DEFAULT = 440;
+export const TASKS_DOCK_WIDTH_MAX = 680;
+
+export function getTasksDockWidth(): number {
+  const raw = localStorage.getItem(TASKS_DOCK_WIDTH_KEY);
+  if (!raw) return TASKS_DOCK_WIDTH_DEFAULT;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n)) return TASKS_DOCK_WIDTH_DEFAULT;
+  return Math.min(TASKS_DOCK_WIDTH_MAX, Math.max(TASKS_DOCK_WIDTH_MIN, n));
+}
+
+export function persistTasksDockWidth(width: number): void {
+  const clamped = Math.min(
+    TASKS_DOCK_WIDTH_MAX,
+    Math.max(TASKS_DOCK_WIDTH_MIN, Math.round(width)),
+  );
+  localStorage.setItem(TASKS_DOCK_WIDTH_KEY, String(clamped));
+}
+
 export function getLastSessionId(): string | null {
   return localStorage.getItem(LAST_SESSION_KEY);
 }
@@ -205,13 +227,19 @@ export async function resumeRun(
   approved: boolean,
   onEvent: (data: Record<string, unknown>) => void,
   note?: string,
-) {
+): Promise<"in_place" | "stream"> {
   const res = await fetch(`${API}/sessions/${sessionId}/runs/${runId}/resume`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({ approved, note }),
   });
+  if (!res.ok) throw new Error(await res.text());
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    return "in_place";
+  }
   await consumeSse(res, onEvent);
+  return "stream";
 }
 
 export async function fetchPlan(sessionId: string) {
@@ -635,7 +663,11 @@ export type RunStatus = {
   session_id: string;
   status: string;
   last_seq: number;
-  pending_tools: Array<{ name: string; call_id: string }>;
+  pending_tools: Array<{
+    name: string;
+    call_id: string;
+    args?: Record<string, unknown>;
+  }>;
   pending_elicitations: Array<{
     id: string;
     request_type: string;

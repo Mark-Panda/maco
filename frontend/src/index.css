@@ -21,6 +21,9 @@
   --alert-warn-border: rgba(245, 158, 11, 0.4);
   --alert-info-bg: rgba(59, 130, 246, 0.1);
   --alert-info-border: rgba(59, 130, 246, 0.4);
+  --status-success: #34d399;
+  --status-success-bg: rgba(52, 211, 153, 0.12);
+  --status-success-border: rgba(52, 211, 153, 0.35);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
 
   --sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -49,6 +52,9 @@
   --alert-warn-border: rgba(245, 158, 11, 0.35);
   --alert-info-bg: rgba(59, 130, 246, 0.1);
   --alert-info-border: rgba(59, 130, 246, 0.3);
+  --status-success: #16a34a;
+  --status-success-bg: rgba(22, 163, 74, 0.1);
+  --status-success-border: rgba(22, 163, 74, 0.28);
   --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06);
 }
 

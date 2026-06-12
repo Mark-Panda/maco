@@ -351,11 +351,19 @@ impl SessionFacade {
 }
 
 fn message_text_from_content(content: &Content) -> String {
+    let has_tool_call = content
+        .parts
+        .iter()
+        .any(|p| matches!(p, Part::FunctionCall { .. }));
+    if has_tool_call {
+        return String::new();
+    }
     content
         .parts
         .iter()
         .filter_map(|p| match p {
             Part::Text { text } => Some(text.as_str()),
+            Part::Thinking { .. } => None,
             _ => None,
         })
         .collect::<Vec<_>>()

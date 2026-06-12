@@ -17,8 +17,9 @@ pub use elicitation::{
     DynamicElicitationHandler, ElicitationBroker, ElicitationRespondBody, ElicitationRunContext,
     MacoElicitationHandler,
 };
+pub use harness::{MacoHarness, ResumeHitlOutcome};
+pub use hitl::HitlBroker;
 pub use run_stream::RunStreamRegistry;
-pub use harness::MacoHarness;
 pub use mcp_pool::McpPool;
 pub use orchestrator::RunOrchestrator;
 pub use skills::SkillLoader;
