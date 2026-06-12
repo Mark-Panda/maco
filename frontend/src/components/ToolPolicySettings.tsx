@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+
+import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import {
   createToolPolicy,
   deleteToolPolicy,
@@ -89,14 +91,26 @@ export function ToolPolicySettings() {
     }
   }
 
-  async function remove(id: string) {
-    if (!confirm("确定删除该策略？")) return;
-    await deleteToolPolicy(id);
-    await refresh();
-    if (editing === id) resetForm();
+  const { runConfirm, dialog } = useConfirmDialog();
+
+  function remove(id: string) {
+    runConfirm(
+      {
+        title: "删除工具策略",
+        description: "确定删除该策略？",
+        confirmLabel: "删除",
+        tone: "danger",
+      },
+      async () => {
+        await deleteToolPolicy(id);
+        await refresh();
+        if (editing === id) resetForm();
+      },
+    );
   }
 
   return (
+    <>
     <div className="panel-section">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
         <h3 style={{ margin: 0 }}>工具策略（HITL）</h3>
@@ -184,5 +198,7 @@ export function ToolPolicySettings() {
         </div>
       )}
     </div>
+    {dialog}
+    </>
   );
 }

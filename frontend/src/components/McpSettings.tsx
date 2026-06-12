@@ -7,6 +7,7 @@ import {
   reloadMcpPool,
   updateMcpServer,
 } from "../api/client";
+import { useConfirmDialog } from "../hooks/useConfirmDialog";
 
 type FormState = {
   name: string;
@@ -98,11 +99,22 @@ export function McpSettings() {
     }
   }
 
-  async function remove(id: string) {
-    if (!confirm("确定删除该 MCP 服务？")) return;
-    await deleteMcpServer(id);
-    await refresh();
-    if (editing === id) resetForm();
+  const { runConfirm, dialog } = useConfirmDialog();
+
+  function remove(id: string) {
+    runConfirm(
+      {
+        title: "删除 MCP 服务",
+        description: "确定删除该 MCP 服务？",
+        confirmLabel: "删除",
+        tone: "danger",
+      },
+      async () => {
+        await deleteMcpServer(id);
+        await refresh();
+        if (editing === id) resetForm();
+      },
+    );
   }
 
   async function reload() {
@@ -119,6 +131,7 @@ export function McpSettings() {
   }
 
   return (
+    <>
     <div className="panel-section">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
         <h3 style={{ margin: 0 }}>MCP 服务</h3>
@@ -248,5 +261,7 @@ export function McpSettings() {
         </div>
       )}
     </div>
+    {dialog}
+    </>
   );
 }

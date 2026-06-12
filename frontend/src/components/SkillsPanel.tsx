@@ -8,6 +8,7 @@ import {
   uploadSkillZip,
   type SkillSummary,
 } from "../api/client";
+import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import { MacoIcon } from "./Icons";
 
 function formatUpdatedAt(iso?: string | null): string {
@@ -104,24 +105,36 @@ export function SkillsPanel() {
     }
   }
 
-  async function onDelete(name: string) {
-    if (!confirm(`确定删除 Skill「${name}」？此操作不可恢复。`)) return;
-    setError(null);
-    setMessage(null);
-    try {
-      await deleteSkill(name);
-      if (selected === name) {
-        setSelected(null);
-        setContent("");
-      }
-      setMessage(`已删除「${name}」。`);
-      await reloadSkills();
-    } catch (e) {
-      setError(String(e));
-    }
+  const { runConfirm, dialog } = useConfirmDialog();
+
+  function onDelete(name: string) {
+    runConfirm(
+      {
+        title: "删除 Skill",
+        description: `确定删除 Skill「${name}」？此操作不可恢复。`,
+        confirmLabel: "删除",
+        tone: "danger",
+      },
+      async () => {
+        setError(null);
+        setMessage(null);
+        try {
+          await deleteSkill(name);
+          if (selected === name) {
+            setSelected(null);
+            setContent("");
+          }
+          setMessage(`已删除「${name}」。`);
+          await reloadSkills();
+        } catch (e) {
+          setError(String(e));
+        }
+      },
+    );
   }
 
   return (
+    <>
     <div className="skills-panel">
       <div className="skills-panel-toolbar">
         <div className="skills-upload">
@@ -264,5 +277,7 @@ export function SkillsPanel() {
         </div>
       </div>
     </div>
+    {dialog}
+    </>
   );
 }

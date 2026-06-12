@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 
 import type { SessionMeta } from "../api/client";
+import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import { MacoIcon } from "./Icons";
 
 type Props = {
@@ -8,7 +9,7 @@ type Props = {
   activeSessionId: string | null;
   onSelect: (session: SessionMeta) => void;
   onNewChat: () => void;
-  onDelete: (sessionId: string) => void;
+  onDelete: (sessionId: string) => void | Promise<void>;
   onRename: (sessionId: string, title: string) => Promise<void>;
 };
 
@@ -59,7 +60,10 @@ export function ChatSessionSidebar({
     await onRename(sessionId, next);
   }
 
+  const { runConfirm, dialog } = useConfirmDialog();
+
   return (
+    <>
     <aside className="chat-session-sidebar" aria-label="历史会话">
       <div className="chat-session-sidebar-header">
         <h2>历史会话</h2>
@@ -142,8 +146,15 @@ export function ChatSessionSidebar({
                     title="删除"
                     aria-label="删除会话"
                     onClick={() => {
-                      if (!confirm(`确定删除「${title}」？`)) return;
-                      onDelete(s.session_id);
+                      runConfirm(
+                        {
+                          title: "删除会话",
+                          description: `确定删除「${title}」？`,
+                          confirmLabel: "删除",
+                          tone: "danger",
+                        },
+                        () => Promise.resolve(onDelete(s.session_id)),
+                      );
                     }}
                   >
                     ×
@@ -155,5 +166,7 @@ export function ChatSessionSidebar({
         )}
       </div>
     </aside>
+    {dialog}
+    </>
   );
 }

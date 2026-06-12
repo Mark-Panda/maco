@@ -156,6 +156,10 @@
   border-color: var(--alert-warn-border);
 }
 
+.run-modal-danger {
+  border-color: rgba(185, 28, 28, 0.45);
+}
+
 .run-modal-info {
   border-color: var(--alert-info-border);
 }
@@ -1613,9 +1617,10 @@ body.sidebar-resizing .sidebar-resizer::after {
   transition: background 0.15s, border-color 0.15s, transform 0.1s;
 }
 
-.btn:hover:not(:disabled) {
+.btn:hover:not(:disabled):not(.btn-primary):not(.btn-danger) {
   background: var(--surface-hover);
   border-color: var(--accent-border);
+  color: var(--text-h);
 }
 
 .btn:active:not(:disabled) {
@@ -1634,16 +1639,44 @@ body.sidebar-resizing .sidebar-resizer::after {
 }
 
 .btn-primary:hover:not(:disabled) {
-  filter: brightness(1.08);
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #fff;
+}
+
+.btn-primary:active:not(:disabled) {
+  background: var(--accent-active);
+  border-color: var(--accent-active);
+  color: #fff;
+}
+
+.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-hover);
+  border-color: var(--danger-hover);
+  color: #fff;
+}
+
+.btn-danger:active:not(:disabled) {
+  background: var(--danger-active);
+  border-color: var(--danger-active);
+  color: #fff;
 }
 
 .btn-ghost {
   border-color: transparent;
   background: transparent;
+  color: var(--text-h);
 }
 
 .btn-ghost:hover:not(:disabled) {
   background: var(--surface-hover);
+  color: var(--text-h);
 }
 
 .btn-sm {
@@ -2489,6 +2522,17 @@ body.sidebar-resizing .sidebar-resizer::after {
 .panel-actions .btn {
   flex: 1;
   min-width: fit-content;
+}
+
+.job-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.panel-card--disabled {
+  opacity: 0.72;
 }
 
 .job-card-actions {

@@ -5,6 +5,7 @@ import {
   type ModelView,
   upsertModel,
 } from "../api/client";
+import { useConfirmDialog } from "../hooks/useConfirmDialog";
 
 type Provider = ModelView["provider"];
 
@@ -114,14 +115,26 @@ export function ModelSettings({ models, onChange }: Props) {
     }
   }
 
-  async function remove(id: string) {
-    if (!confirm("确定删除该模型配置？")) return;
-    await deleteModel(id);
-    onChange(await fetchModels());
-    if (editing === id) resetForm();
+  const { runConfirm, dialog } = useConfirmDialog();
+
+  function remove(id: string) {
+    runConfirm(
+      {
+        title: "删除模型配置",
+        description: "确定删除该模型配置？",
+        confirmLabel: "删除",
+        tone: "danger",
+      },
+      async () => {
+        await deleteModel(id);
+        onChange(await fetchModels());
+        if (editing === id) resetForm();
+      },
+    );
   }
 
   return (
+    <>
     <div className="panel-section">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
         <h3 style={{ margin: 0 }}>模型</h3>
@@ -251,5 +264,7 @@ export function ModelSettings({ models, onChange }: Props) {
         </div>
       )}
     </div>
+    {dialog}
+    </>
   );
 }

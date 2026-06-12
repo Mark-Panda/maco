@@ -4,6 +4,7 @@ import {
   createApiToken,
   createJob,
   createSession,
+  deleteJob,
   deleteMemories,
   exportSessionUrl,
   deleteSession,
@@ -35,12 +36,14 @@ import {
   revokeApiToken,
   runJobNow,
   searchMemory,
+  updateJobEnabled,
   setApiToken,
   streamChat,
   streamRun,
   uploadArtifact,
 } from "./api/client";
 import { MacoIcon, type MacoIconName } from "./components/Icons";
+import { useConfirmDialog } from "./hooks/useConfirmDialog";
 import { McpSettings } from "./components/McpSettings";
 import { ModelSettings } from "./components/ModelSettings";
 import { ChatMessagesPanel } from "./components/ChatMessagesPanel";
@@ -173,6 +176,7 @@ export default function App() {
   }
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [jobName, setJobName] = useState("");
+  const { runConfirm, dialog: confirmDialog } = useConfirmDialog();
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [memorySearchQ, setMemorySearchQ] = useState("");
@@ -416,16 +420,26 @@ export default function App() {
   }
 
   async function deleteSessionById(sid: string) {
-    await deleteSession(sid);
+    const previous = sessions;
+    setSessions((prev) => prev.filter((s) => s.session_id !== sid));
     if (sessionId === sid) {
+      sessionIdRef.current = null;
       reset();
       setLastSessionId(null);
       setArtifacts([]);
       setPlan("");
       setTodos([]);
       setProjectRootDraft("");
+      clearMessages();
     }
-    setSessions(await listSessions());
+    try {
+      await deleteSession(sid);
+      setSessions(await listSessions());
+    } catch (e) {
+      setSessions(previous);
+      pushMessage({ role: "assistant", content: `删除会话失败：${e}` });
+      throw e;
+    }
   }
 
   function startNewChat() {
@@ -670,7 +684,7 @@ export default function App() {
                 activeSessionId={sessionId}
                 onSelect={(s) => loadSession(s.session_id, s.model_id, s.project_root)}
                 onNewChat={startNewChat}
-                onDelete={(sid) => void deleteSessionById(sid)}
+                onDelete={deleteSessionById}
                 onRename={renameSession}
               />
               <div className="chat-column">
@@ -978,22 +992,31 @@ export default function App() {
           {appView === "jobs" && (
             <div className="panel-section">
               <h3>定时任务</h3>
-              {jobs.map((j) => (
-                <div key={j.id} className="panel-card">
-                  <strong>{j.name}</strong>
-                  <div className="model-meta">{j.job_type} · {j.status}</div>
-                  {j.next_run_at && <div className="model-meta">下次: {j.next_run_at}</div>}
+              {jobs.length === 0 ? (
+                <p className="panel-empty">暂无定时任务。可在下方创建 hourly ping 任务。</p>
+              ) : null}
+              {jobs.map((j) => {
+                const paused = j.enabled === 0;
+                return (
+                <div key={j.id} className={`panel-card${paused ? " panel-card--disabled" : ""}`}>
+                  <div className="job-card-header">
+                    <strong>{j.name}</strong>
+                    {paused ? <span className="badge">已暂停</span> : null}
+                  </div>
+                  <div className="model-meta">
+                    {j.job_type} · {j.schedule ?? "手动"} · {j.status}
+                  </div>
+                  {j.next_run_at && !paused ? (
+                    <div className="model-meta">下次: {j.next_run_at}</div>
+                  ) : null}
+                  {j.last_run_at ? (
+                    <div className="model-meta">上次: {j.last_run_at}</div>
+                  ) : null}
                   <div className="job-card-actions">
                     <button
                       type="button"
-                      className="btn btn-sm"
-                      onClick={async () => setJobs(await fetchJobs())}
-                    >
-                      刷新
-                    </button>
-                    <button
-                      type="button"
                       className="btn btn-sm btn-primary"
+                      disabled={paused}
                       onClick={async () => {
                         await runJobNow(j.id);
                         setJobs(await fetchJobs());
@@ -1001,9 +1024,40 @@ export default function App() {
                     >
                       立即执行
                     </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={async () => {
+                        await updateJobEnabled(j.id, paused);
+                        setJobs(await fetchJobs());
+                      }}
+                    >
+                      {paused ? "恢复" : "暂停"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => {
+                        runConfirm(
+                          {
+                            title: "删除定时任务",
+                            description: `确定删除任务「${j.name}」？此操作不可恢复。`,
+                            confirmLabel: "删除",
+                            tone: "danger",
+                          },
+                          async () => {
+                            await deleteJob(j.id);
+                            setJobs(await fetchJobs());
+                          },
+                        );
+                      }}
+                    >
+                      删除
+                    </button>
                   </div>
                 </div>
-              ))}
+              );
+              })}
               <div className="field">
                 <label>新建 ping 任务</label>
                 <input
@@ -1139,6 +1193,8 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {confirmDialog}
 
       {pendingConfirm && (
         <HitlConfirmModal

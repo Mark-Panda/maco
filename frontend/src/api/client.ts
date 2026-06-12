@@ -356,6 +356,23 @@ export async function runJobNow(id: string) {
   return res.json() as Promise<JobRecord>;
 }
 
+export async function updateJobEnabled(id: string, enabled: boolean) {
+  const res = await fetch(`${API}/jobs/${id}`, {
+    method: "PATCH",
+    headers: authHeaders(),
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function deleteJob(id: string) {
+  const res = await fetch(`${API}/jobs/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
 export async function patchTodo(
   sessionId: string,
   taskKey: string,
@@ -399,10 +416,15 @@ export type ApiTokenListItem = {
   created_at: string;
 };
 
+export function visibleSessions(rows: SessionMeta[]): SessionMeta[] {
+  return rows.filter((s) => s.status !== "deleted" && s.status !== "pending_delete");
+}
+
 export async function listSessions() {
   const res = await fetch(`${API}/sessions`, { headers: authHeaders() });
   if (!res.ok) throw new Error(await res.text());
-  return res.json() as Promise<SessionMeta[]>;
+  const rows = (await res.json()) as SessionMeta[];
+  return visibleSessions(rows);
 }
 
 export async function searchMemory(q: string) {

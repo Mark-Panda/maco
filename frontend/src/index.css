@@ -11,8 +11,13 @@
   --surface-hover: #1c2330;
   --border: #2a3140;
   --accent: #8b5cf6;
+  --accent-hover: #9d71f7;
+  --accent-active: #7c4fd9;
   --accent-bg: rgba(139, 92, 246, 0.12);
   --accent-border: rgba(139, 92, 246, 0.45);
+  --danger: #b91c1c;
+  --danger-hover: #dc2626;
+  --danger-active: #991b1b;
   --icon-bg: rgba(148, 163, 184, 0.06);
   --icon-bg-hover: rgba(148, 163, 184, 0.1);
   --icon-bg-active: rgba(139, 92, 246, 0.14);
@@ -42,8 +47,13 @@
   --surface-hover: #f1f5f9;
   --border: #e2e8f0;
   --accent: #7c3aed;
+  --accent-hover: #6d28d9;
+  --accent-active: #5b21b6;
   --accent-bg: rgba(124, 58, 237, 0.08);
   --accent-border: rgba(124, 58, 237, 0.28);
+  --danger: #b91c1c;
+  --danger-hover: #991b1b;
+  --danger-active: #7f1d1d;
   --icon-bg: rgba(15, 23, 42, 0.04);
   --icon-bg-hover: rgba(15, 23, 42, 0.07);
   --icon-bg-active: rgba(124, 58, 237, 0.1);
