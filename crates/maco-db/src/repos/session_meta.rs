@@ -1,7 +1,7 @@
 //! `maco_session_meta` 表：会话标题、模型绑定与生命周期状态。
 
 use chrono::Utc;
-use maco_core::{MacoError, MacoResult};
+use maco_core::{AgentPermissionMode, MacoError, MacoResult};
 use sqlx::SqlitePool;
 
 /// 业务侧会话元数据（与 adk session_id 一一对应）。
@@ -17,6 +17,8 @@ pub struct SessionMetaRecord {
     pub project_id: Option<String>,
     /// 绑定的本地项目根目录（绝对路径）。
     pub project_root: Option<String>,
+    /// Agent 权限模式。
+    pub permission_mode: String,
     /// 生命周期状态。
     pub status: String,
     /// 创建时间。
@@ -37,14 +39,15 @@ impl SessionMetaRepo {
 
     pub async fn insert(&self, rec: &SessionMetaRecord) -> MacoResult<()> {
         sqlx::query(
-            "INSERT INTO maco_session_meta (session_id, title, model_id, project_id, project_root, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO maco_session_meta (session_id, title, model_id, project_id, project_root, permission_mode, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&rec.session_id)
         .bind(&rec.title)
         .bind(&rec.model_id)
         .bind(&rec.project_id)
         .bind(&rec.project_root)
+        .bind(&rec.permission_mode)
         .bind(&rec.status)
         .bind(&rec.created_at)
         .bind(&rec.updated_at)
@@ -56,7 +59,7 @@ impl SessionMetaRepo {
 
     pub async fn get(&self, session_id: &str) -> MacoResult<Option<SessionMetaRecord>> {
         sqlx::query_as::<_, SessionMetaRecord>(
-            "SELECT session_id, title, model_id, project_id, project_root, status, created_at, updated_at
+            "SELECT session_id, title, model_id, project_id, project_root, permission_mode, status, created_at, updated_at
              FROM maco_session_meta WHERE session_id = ?",
         )
         .bind(session_id)
@@ -67,7 +70,7 @@ impl SessionMetaRepo {
 
     pub async fn list_active(&self) -> MacoResult<Vec<SessionMetaRecord>> {
         sqlx::query_as::<_, SessionMetaRecord>(
-            "SELECT session_id, title, model_id, project_id, project_root, status, created_at, updated_at
+            "SELECT session_id, title, model_id, project_id, project_root, permission_mode, status, created_at, updated_at
              FROM maco_session_meta WHERE status NOT IN ('deleted') ORDER BY updated_at DESC",
         )
         .fetch_all(&self.pool)
@@ -81,7 +84,7 @@ impl SessionMetaRepo {
         }
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let q = format!(
-            "SELECT session_id, title, model_id, project_id, project_root, status, created_at, updated_at
+            "SELECT session_id, title, model_id, project_id, project_root, permission_mode, status, created_at, updated_at
              FROM maco_session_meta WHERE session_id IN ({placeholders})"
         );
         let mut query = sqlx::query_as::<_, SessionMetaRecord>(&q);
@@ -165,9 +168,27 @@ impl SessionMetaRepo {
         Ok(())
     }
 
+    pub async fn update_permission_mode(
+        &self,
+        session_id: &str,
+        mode: AgentPermissionMode,
+    ) -> MacoResult<()> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE maco_session_meta SET permission_mode = ?, updated_at = ? WHERE session_id = ?",
+        )
+        .bind(mode.as_str())
+        .bind(now)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| MacoError::database(e.to_string()))?;
+        Ok(())
+    }
+
     pub async fn list_orphans(&self) -> MacoResult<Vec<SessionMetaRecord>> {
         sqlx::query_as::<_, SessionMetaRecord>(
-            "SELECT session_id, title, model_id, project_id, project_root, status, created_at, updated_at
+            "SELECT session_id, title, model_id, project_id, project_root, permission_mode, status, created_at, updated_at
              FROM maco_session_meta WHERE status IN ('orphan_create', 'pending_delete')",
         )
         .fetch_all(&self.pool)
@@ -184,6 +205,7 @@ impl SessionMetaRepo {
         title: Option<String>,
         model_id: Option<String>,
         project_root: Option<String>,
+        permission_mode: Option<AgentPermissionMode>,
     ) -> SessionMetaRecord {
         let now = Self::now();
         SessionMetaRecord {
@@ -192,6 +214,10 @@ impl SessionMetaRepo {
             model_id,
             project_id: None,
             project_root,
+            permission_mode: permission_mode
+                .unwrap_or_default()
+                .as_str()
+                .to_string(),
             status: "active".into(),
             created_at: now.clone(),
             updated_at: now,

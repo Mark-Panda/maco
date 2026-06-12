@@ -2,6 +2,7 @@ const API = "/api";
 const TOKEN_KEY = "maco_api_token";
 const LAST_SESSION_KEY = "maco_last_session";
 const LAST_MODEL_KEY = "maco_last_model";
+const LAST_PERMISSION_MODE_KEY = "maco_last_permission_mode";
 const SIDEBAR_VISIBLE_KEY = "maco_sidebar_visible";
 const SIDEBAR_WIDTH_KEY = "maco_sidebar_width";
 
@@ -69,6 +70,23 @@ export function getLastModelId(): string | null {
 export function setLastModelId(id: string | null) {
   if (id) localStorage.setItem(LAST_MODEL_KEY, id);
   else localStorage.removeItem(LAST_MODEL_KEY);
+}
+
+export type AgentPermissionMode =
+  | "request_approval"
+  | "auto_approve"
+  | "full_access";
+
+export function getLastPermissionMode(): AgentPermissionMode {
+  const raw = localStorage.getItem(LAST_PERMISSION_MODE_KEY);
+  if (raw === "auto_approve" || raw === "full_access" || raw === "request_approval") {
+    return raw;
+  }
+  return "request_approval";
+}
+
+export function setLastPermissionMode(mode: AgentPermissionMode) {
+  localStorage.setItem(LAST_PERMISSION_MODE_KEY, mode);
 }
 
 export type ModelView = {
@@ -160,10 +178,18 @@ export async function deleteModel(id: string) {
   if (!res.ok) throw new Error(await res.text());
 }
 
+function normalizePermissionMode(
+  mode: string | null | undefined,
+): AgentPermissionMode {
+  if (mode === "auto_approve" || mode === "full_access") return mode;
+  return "request_approval";
+}
+
 export async function createSession(
   title?: string,
   modelId?: string,
   projectRoot?: string,
+  permissionMode?: AgentPermissionMode,
 ) {
   const res = await fetch(`${API}/sessions`, {
     method: "POST",
@@ -172,6 +198,7 @@ export async function createSession(
       title: title ?? "New chat",
       model_id: modelId,
       project_root: projectRoot?.trim() || undefined,
+      permission_mode: permissionMode ?? "request_approval",
     }),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -392,6 +419,7 @@ export type SessionMeta = {
   title: string | null;
   model_id: string | null;
   project_root: string | null;
+  permission_mode: AgentPermissionMode;
   status: string;
   created_at: string;
   updated_at: string;
@@ -417,7 +445,12 @@ export type ApiTokenListItem = {
 };
 
 export function visibleSessions(rows: SessionMeta[]): SessionMeta[] {
-  return rows.filter((s) => s.status !== "deleted" && s.status !== "pending_delete");
+  return rows
+    .filter((s) => s.status !== "deleted" && s.status !== "pending_delete")
+    .map((s) => ({
+      ...s,
+      permission_mode: normalizePermissionMode(s.permission_mode),
+    }));
 }
 
 export async function listSessions() {
@@ -580,7 +613,12 @@ export async function deleteSession(sessionId: string) {
 
 export async function updateSession(
   sessionId: string,
-  body: { title?: string; model_id?: string; project_root?: string },
+  body: {
+    title?: string;
+    model_id?: string;
+    project_root?: string;
+    permission_mode?: AgentPermissionMode;
+  },
 ) {
   const res = await fetch(`${API}/sessions/${sessionId}`, {
     method: "PATCH",

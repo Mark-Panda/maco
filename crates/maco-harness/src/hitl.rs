@@ -8,7 +8,8 @@ use adk_core::{Content, FunctionResponseData, Part};
 use adk_core::Result as AdkResult;
 use maco_core::{ResumeContext, SseEnvelope, RUN_STATUS_AWAITING_USER};
 use maco_db::ToolPolicyRecord;
-use maco_governance::{resolve_action, PolicyAction};
+use maco_core::AgentPermissionMode;
+use maco_governance::{resolve_action_with_mode, PolicyAction};
 use tokio::sync::{mpsc, Mutex, oneshot};
 
 use crate::orchestrator::RunOrchestrator;
@@ -64,6 +65,8 @@ pub struct HitlGate {
     pub orchestrator: RunOrchestrator,
     /// 启用的工具策略规则。
     pub policies: Vec<ToolPolicyRecord>,
+    /// 会话权限模式。
+    pub permission_mode: AgentPermissionMode,
     /// SSE 推送通道（通知前端待审批工具）。
     pub sse_tx: Option<mpsc::Sender<SseEnvelope>>,
     /// 广播注册表（SSE 重连）。
@@ -86,7 +89,12 @@ impl HitlGate {
         } else {
             (source_type, tool_name)
         };
-        match resolve_action(&self.policies, policy_source, policy_tool) {
+        match resolve_action_with_mode(
+            &self.policies,
+            self.permission_mode,
+            policy_source,
+            policy_tool,
+        ) {
             PolicyAction::Allow => Ok(None),
             PolicyAction::Deny => Ok(Some(denied_content(
                 tool_name,

@@ -1,5 +1,6 @@
-//! 工具调用 HITL：根据 `ToolPolicyRecord` 解析 allow / confirm / deny。
+//! 工具调用 HITL：根据 `ToolPolicyRecord` 与会话权限模式解析 allow / confirm / deny。
 
+use maco_core::AgentPermissionMode;
 use maco_db::ToolPolicyRecord;
 
 /// 工具策略判定结果。
@@ -48,6 +49,41 @@ pub fn resolve_action(
     best
 }
 
+/// 结合会话权限模式与工具策略，得到最终 HITL 动作。
+pub fn resolve_action_with_mode(
+    policies: &[ToolPolicyRecord],
+    mode: AgentPermissionMode,
+    source_type: &str,
+    tool_name: &str,
+) -> PolicyAction {
+    let base = resolve_action(policies, source_type, tool_name);
+    if base == PolicyAction::Deny {
+        return PolicyAction::Deny;
+    }
+    match mode {
+        AgentPermissionMode::FullAccess => PolicyAction::Allow,
+        AgentPermissionMode::AutoApprove => base,
+        AgentPermissionMode::RequestApproval => {
+            if needs_request_approval(source_type, tool_name) {
+                PolicyAction::Confirm
+            } else {
+                base
+            }
+        }
+    }
+}
+
+/// `request_approval` 模式下需额外确认的工具：shell、MCP（含外网与外部文件）。
+fn needs_request_approval(source_type: &str, tool_name: &str) -> bool {
+    if tool_name == "bash" {
+        return true;
+    }
+    if source_type == "mcp" || tool_name.contains("__") {
+        return true;
+    }
+    false
+}
+
 fn wildcard_match(pattern: &str, name: &str) -> bool {
     if pattern == "*" {
         return true;
@@ -61,6 +97,7 @@ fn wildcard_match(pattern: &str, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maco_core::AgentPermissionMode;
 
     fn policy(source: &str, pattern: &str, action: &str) -> ToolPolicyRecord {
         ToolPolicyRecord {
@@ -90,5 +127,74 @@ mod tests {
             policy("tool", "bash", "deny"),
         ];
         assert_eq!(resolve_action(&policies, "tool", "bash"), PolicyAction::Deny);
+    }
+
+    #[test]
+    fn full_access_skips_confirm() {
+        let policies = vec![policy("tool", "bash", "confirm")];
+        assert_eq!(
+            resolve_action_with_mode(
+                &policies,
+                AgentPermissionMode::FullAccess,
+                "tool",
+                "bash",
+            ),
+            PolicyAction::Allow
+        );
+    }
+
+    #[test]
+    fn request_approval_confirms_bash_and_mcp() {
+        let policies = vec![];
+        assert_eq!(
+            resolve_action_with_mode(
+                &policies,
+                AgentPermissionMode::RequestApproval,
+                "tool",
+                "bash",
+            ),
+            PolicyAction::Confirm
+        );
+        assert_eq!(
+            resolve_action_with_mode(
+                &policies,
+                AgentPermissionMode::RequestApproval,
+                "mcp",
+                "read_file",
+            ),
+            PolicyAction::Confirm
+        );
+        assert_eq!(
+            resolve_action_with_mode(
+                &policies,
+                AgentPermissionMode::RequestApproval,
+                "tool",
+                "update_plan",
+            ),
+            PolicyAction::Allow
+        );
+    }
+
+    #[test]
+    fn auto_approve_uses_policy_only() {
+        let policies = vec![policy("mcp", "delete_*", "confirm")];
+        assert_eq!(
+            resolve_action_with_mode(
+                &policies,
+                AgentPermissionMode::AutoApprove,
+                "mcp",
+                "read_file",
+            ),
+            PolicyAction::Allow
+        );
+        assert_eq!(
+            resolve_action_with_mode(
+                &policies,
+                AgentPermissionMode::AutoApprove,
+                "mcp",
+                "delete_file",
+            ),
+            PolicyAction::Confirm
+        );
     }
 }

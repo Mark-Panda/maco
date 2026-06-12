@@ -9,8 +9,8 @@ use chrono::Utc;
 use maco_storage::memory_admin;
 use adk_session::{CreateRequest, DeleteRequest, GetRequest, ListRequest};
 use maco_core::{
-    resolve_project_root, ChatMessage, MacoError, MacoResult, MemoryListItem, MemoryListResponse,
-    MemorySearchResponse, SessionMessagesResponse, APP_NAME, USER_ID,
+    resolve_project_root, AgentPermissionMode, ChatMessage, MacoError, MacoResult, MemoryListItem,
+    MemoryListResponse, MemorySearchResponse, SessionMessagesResponse, APP_NAME, USER_ID,
 };
 use maco_db::{ModelRecord, ModelRepo, SessionMetaRecord, SessionMetaRepo};
 use maco_storage::AdkStorage;
@@ -34,6 +34,7 @@ impl SessionFacade {
         title: Option<String>,
         model_id: Option<String>,
         project_root: Option<String>,
+        permission_mode: Option<AgentPermissionMode>,
     ) -> MacoResult<SessionMetaRecord> {
         let project_root = resolve_project_root(project_root.as_deref())?
             .map(|p| p.to_string_lossy().into_owned());
@@ -53,7 +54,13 @@ impl SessionFacade {
             .await
             .map_err(|e| MacoError::Adk(e.to_string()))?;
         let session_id = session.id().to_string();
-        let rec = SessionMetaRepo::new_record(session_id.clone(), title, model_id, project_root);
+        let rec = SessionMetaRepo::new_record(
+            session_id.clone(),
+            title,
+            model_id,
+            project_root,
+            permission_mode,
+        );
         if let Err(e) = self.meta.insert(&rec).await {
             let _ = self
                 .adk
@@ -88,7 +95,7 @@ impl SessionFacade {
         for s in adk_sessions {
             let sid = s.id().to_string();
             if !known.contains(&sid) {
-                let rec = SessionMetaRepo::new_record(sid.clone(), None, None, None);
+                let rec = SessionMetaRepo::new_record(sid.clone(), None, None, None, None);
                 let _ = self.meta.insert(&rec).await;
                 metas.push(rec);
             }
@@ -116,6 +123,15 @@ impl SessionFacade {
             .map_err(|e| MacoError::Adk(e.to_string()))?;
         self.meta.update_status(session_id, "deleted").await?;
         Ok(())
+    }
+
+    /// 更新会话 Agent 权限模式。
+    pub async fn set_permission_mode(
+        &self,
+        session_id: &str,
+        mode: AgentPermissionMode,
+    ) -> MacoResult<()> {
+        self.meta.update_permission_mode(session_id, mode).await
     }
 
     /// 绑定或清除会话的项目根目录。

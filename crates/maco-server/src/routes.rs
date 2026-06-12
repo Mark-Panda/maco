@@ -148,6 +148,8 @@ struct CreateSessionBody {
     model_id: Option<String>,
     /// 绑定的本地项目根目录（绝对路径，可含 `~`）。
     project_root: Option<String>,
+    /// Agent 权限模式，默认 `request_approval`。
+    permission_mode: Option<String>,
 }
 
 /// `POST /sessions` — 创建新会话。
@@ -155,9 +157,18 @@ async fn create_session(
     State(state): State<AppState>,
     Json(body): Json<CreateSessionBody>,
 ) -> Result<Json<maco_db::SessionMetaRecord>, ApiError> {
+    let permission_mode = body
+        .permission_mode
+        .as_deref()
+        .map(maco_core::AgentPermissionMode::parse);
     let rec = state
         .facade
-        .create_session(body.title, body.model_id, body.project_root)
+        .create_session(
+            body.title,
+            body.model_id,
+            body.project_root,
+            permission_mode,
+        )
         .await?;
     if rec.project_root.is_some() {
         if let Err(e) = state.sync_filesystem_mcp().await {
@@ -176,6 +187,8 @@ struct UpdateSessionBody {
     model_id: Option<String>,
     /// 项目根目录；传空字符串表示清除绑定。
     project_root: Option<String>,
+    /// Agent 权限模式。
+    permission_mode: Option<String>,
 }
 
 /// `GET /sessions/{id}/messages` — 加载会话历史消息（供前端恢复对话）。
@@ -211,6 +224,12 @@ async fn update_session(
         if let Err(e) = state.sync_filesystem_mcp().await {
             tracing::warn!("sync filesystem mcp after update project_root: {e}");
         }
+    }
+    if let Some(mode) = body.permission_mode.as_deref() {
+        state
+            .facade
+            .set_permission_mode(&id, maco_core::AgentPermissionMode::parse(mode))
+            .await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }

@@ -56,6 +56,53 @@ impl SessionMetaStatus {
     }
 }
 
+/// Agent 对话权限模式（会话级）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPermissionMode {
+    /// 编辑外部文件、使用互联网时始终请求批准（默认）。
+    #[default]
+    RequestApproval,
+    /// 仅对检测到的风险操作请求批准。
+    AutoApprove,
+    /// 不受限制地访问互联网与本地文件。
+    FullAccess,
+}
+
+impl AgentPermissionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RequestApproval => "request_approval",
+            Self::AutoApprove => "auto_approve",
+            Self::FullAccess => "full_access",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "auto_approve" => Self::AutoApprove,
+            "full_access" => Self::FullAccess,
+            _ => Self::RequestApproval,
+        }
+    }
+
+    pub fn label_zh(&self) -> &'static str {
+        match self {
+            Self::RequestApproval => "请求批准",
+            Self::AutoApprove => "替我审批",
+            Self::FullAccess => "完全访问权限",
+        }
+    }
+
+    pub fn description_zh(&self) -> &'static str {
+        match self {
+            Self::RequestApproval => "编辑外部文件和使用互联网时始终询问",
+            Self::AutoApprove => "仅对检测到的风险操作请求批准",
+            Self::FullAccess => "可不受限制地访问互联网和您电脑上的任何文件",
+        }
+    }
+}
+
 /// Run 暂停时序列化进 `maco_runs.resume_context`，用于 HITL/Elicitation 恢复。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResumeContext {

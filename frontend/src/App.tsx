@@ -19,17 +19,20 @@ import {
   fetchUsageSummary,
   getApiToken,
   getLastModelId,
+  getLastPermissionMode,
   getLastSessionId,
   interruptChat,
   listApiTokens,
   listArtifacts,
   listSessions,
   setLastModelId,
+  setLastPermissionMode,
   setLastSessionId,
   updateSession,
   type JobRecord,
   type ModelView,
   type SessionMeta,
+  type AgentPermissionMode,
   pickProjectDirectory,
   respondElicitation,
   resumeRun,
@@ -51,6 +54,7 @@ import { ChatSessionSidebar } from "./components/ChatSessionSidebar";
 import { ElicitationModal } from "./components/ElicitationModal";
 import { HitlConfirmModal } from "./components/HitlConfirmModal";
 import { RunStatusBar } from "./components/RunStatusBar";
+import { AgentPermissionSelector } from "./components/AgentPermissionSelector";
 import { SessionProjectBar } from "./components/SessionProjectBar";
 import { TasksDock } from "./components/TasksDock";
 import { useTasksDockWidth } from "./hooks/useTasksDockWidth";
@@ -192,6 +196,8 @@ export default function App() {
     Array<{ id: string; filename: string; mime_type: string; size_bytes: number }>
   >([]);
   const [projectRootDraft, setProjectRootDraft] = useState("");
+  const [permissionMode, setPermissionMode] =
+    useState<AgentPermissionMode>(getLastPermissionMode);
   const [pickingFolder, setPickingFolder] = useState(false);
   const [restored, setRestored] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -229,7 +235,7 @@ export default function App() {
       .then((rows) => {
         setSessions(rows);
         const s = rows.find((r) => r.session_id === saved);
-        return loadSession(saved, s?.model_id, s?.project_root);
+        return loadSession(saved, s?.model_id, s?.project_root, s?.permission_mode);
       })
       .finally(() => setRestored(true));
   }, [models, restored]);
@@ -338,7 +344,8 @@ export default function App() {
     if (sessionId) return sessionId;
     const modelId = selectedModelId || defaultModel?.id;
     const root = projectRootDraft.trim() || undefined;
-    const s = await createSession(undefined, modelId, root);
+    const s = await createSession(undefined, modelId, root, permissionMode);
+    setLastPermissionMode(permissionMode);
     sessionIdRef.current = s.session_id;
     setSessionId(s.session_id);
     setSessions(await listSessions());
@@ -355,11 +362,15 @@ export default function App() {
     sid: string,
     modelId?: string | null,
     projectRoot?: string | null,
+    mode?: AgentPermissionMode | null,
   ) {
     sessionIdRef.current = sid;
     setSessionId(sid);
     if (modelId) setSelectedModelId(modelId);
     setProjectRootDraft(projectRoot ?? "");
+    const resolved = mode ?? getLastPermissionMode();
+    setPermissionMode(resolved);
+    setLastPermissionMode(resolved);
     setActiveRunId(null);
     setPendingConfirm(null);
     setPendingElicitation(null);
@@ -430,6 +441,7 @@ export default function App() {
       setPlan("");
       setTodos([]);
       setProjectRootDraft("");
+      setPermissionMode(getLastPermissionMode());
       clearMessages();
     }
     try {
@@ -449,6 +461,26 @@ export default function App() {
     setPlan("");
     setTodos([]);
     setProjectRootDraft("");
+    setPermissionMode(getLastPermissionMode());
+  }
+
+  async function changePermissionMode(mode: AgentPermissionMode) {
+    const previous = permissionMode;
+    setPermissionMode(mode);
+    setLastPermissionMode(mode);
+    if (!sessionId) return;
+    try {
+      await updateSession(sessionId, { permission_mode: mode });
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.session_id === sessionId ? { ...s, permission_mode: mode } : s,
+        ),
+      );
+    } catch (e) {
+      setPermissionMode(previous);
+      setLastPermissionMode(previous);
+      pushMessage({ role: "assistant", content: String(e) });
+    }
   }
 
   async function pickProjectFolder() {
@@ -682,7 +714,9 @@ export default function App() {
               <ChatSessionSidebar
                 sessions={sessions}
                 activeSessionId={sessionId}
-                onSelect={(s) => loadSession(s.session_id, s.model_id, s.project_root)}
+                onSelect={(s) =>
+                  loadSession(s.session_id, s.model_id, s.project_root, s.permission_mode)
+                }
                 onNewChat={startNewChat}
                 onDelete={deleteSessionById}
                 onRename={renameSession}
@@ -707,6 +741,7 @@ export default function App() {
                     value={selectedModelId}
                     onChange={(e) => setSelectedModelId(e.target.value)}
                     title="对话模型"
+                    disabled={loading}
                   >
                     {models.length === 0 ? (
                       <option value="">无模型 — 请打开「模型」</option>
@@ -779,6 +814,13 @@ export default function App() {
 
                 <div className="chat-composer">
                   <div className="chat-composer-inner">
+                    <AgentPermissionSelector
+                      value={permissionMode}
+                      disabled={loading}
+                      compact
+                      menuPlacement="above"
+                      onChange={changePermissionMode}
+                    />
                     <input
                       ref={fileInputRef}
                       type="file"

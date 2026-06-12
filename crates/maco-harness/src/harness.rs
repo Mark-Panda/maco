@@ -7,8 +7,8 @@ use adk_rust::prelude::*;
 use adk_tool::{LoadArtifactsTool, SimpleToolContext};
 use futures::StreamExt;
 use maco_core::{
-    ensure_session_workspace, resolve_project_root, MacoError, MacoResult, PendingToolCall,
-    ResumeContext, SseEnvelope, RUN_STATUS_AWAITING_USER, APP_NAME, USER_ID,
+    ensure_session_workspace, resolve_project_root, AgentPermissionMode, MacoError, MacoResult,
+    PendingToolCall, ResumeContext, SseEnvelope, RUN_STATUS_AWAITING_USER, APP_NAME, USER_ID,
 };
 use maco_db::{
     CallbackLogRepo, ElicitationRepo, ModelRecord, ReactRepo, SessionMetaRepo, ToolPolicyRecord,
@@ -117,6 +117,16 @@ impl MacoHarness {
     async fn session_project_root(&self, session_id: &str) -> MacoResult<Option<PathBuf>> {
         let meta = self.meta.get(session_id).await?;
         resolve_project_root(meta.as_ref().and_then(|m| m.project_root.as_deref()))
+    }
+
+    async fn session_permission_mode(&self, session_id: &str) -> AgentPermissionMode {
+        self.meta
+            .get(session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|m| AgentPermissionMode::parse(&m.permission_mode))
+            .unwrap_or_default()
     }
 
     /// 热更新 HITL 工具策略（影响后续新 Run）。
@@ -379,11 +389,13 @@ impl MacoHarness {
             run_id.clone(),
         );
         let streams = self.run_streams.clone();
+        let permission_mode = self.session_permission_mode(session_id).await;
         let hitl = Arc::new(HitlGate {
             run_id: run_id.clone(),
             session_id: session_id.to_string(),
             orchestrator: self.orchestrator.clone(),
             policies: self.tool_policies.read().await.clone(),
+            permission_mode,
             sse_tx: Some(tx.clone()),
             stream: Some(streams.clone()),
             broker: self.hitl_broker.clone(),

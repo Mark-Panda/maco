@@ -26,6 +26,8 @@ pub struct SessionMetaDoc {
     pub model_id: Option<String>,
     /// 绑定的本地项目根目录。
     pub project_root: Option<String>,
+    /// Agent 权限模式（`request_approval` / `auto_approve` / `full_access`）。
+    pub permission_mode: String,
     /// 生命周期状态（`active` / `deleted` 等）。
     pub status: String,
 }
@@ -39,6 +41,8 @@ pub struct CreateSessionDoc {
     pub model_id: Option<String>,
     /// 绑定的本地项目根目录。
     pub project_root: Option<String>,
+    /// Agent 权限模式，默认 `request_approval`。
+    pub permission_mode: Option<String>,
 }
 
 /// `POST /chat` 请求体。
