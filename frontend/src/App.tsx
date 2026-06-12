@@ -19,13 +19,6 @@ import {
   getApiToken,
   getLastModelId,
   getLastSessionId,
-  getSidebarVisible,
-  getSidebarWidth,
-  persistSidebarVisible,
-  persistSidebarWidth,
-  SIDEBAR_WIDTH_DEFAULT,
-  SIDEBAR_WIDTH_MAX,
-  SIDEBAR_WIDTH_MIN,
   interruptChat,
   listApiTokens,
   listArtifacts,
@@ -51,6 +44,8 @@ import {
 import { MacoIcon, type MacoIconName } from "./components/Icons";
 import { McpSettings } from "./components/McpSettings";
 import { ModelSettings } from "./components/ModelSettings";
+import { SessionProjectBar } from "./components/SessionProjectBar";
+import { TasksDock } from "./components/TasksDock";
 import { ArtifactPreviewModal } from "./components/ArtifactPreviewModal";
 import { SkillsPanel } from "./components/SkillsPanel";
 import { ToolPolicySettings } from "./components/ToolPolicySettings";
@@ -74,7 +69,8 @@ type SseEvent = {
   };
 };
 
-type SidebarTab = "sessions" | "tasks" | "memory" | "skills" | "usage" | "jobs" | "settings";
+type ToolTab = "memory" | "skills" | "usage" | "jobs" | "models" | "mcp" | "toolPolicies" | "settings";
+type AppView = "chat" | ToolTab;
 
 export default function App() {
   const {
@@ -105,15 +101,8 @@ export default function App() {
   const [memoryDeleteQ, setMemoryDeleteQ] = useState("");
   const [models, setModels] = useState<ModelView[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("tasks");
+  const [appView, setAppView] = useState<AppView>("chat");
   const [theme, setTheme] = useState<Theme>(getTheme);
-  const [sidebarOpen, setSidebarOpen] = useState(getSidebarVisible);
-  const [sidebarWidth, setSidebarWidth] = useState(getSidebarWidth);
-  const sidebarWidthRef = useRef(sidebarWidth);
-
-  useEffect(() => {
-    sidebarWidthRef.current = sidebarWidth;
-  }, [sidebarWidth]);
 
   useEffect(() => {
     applyTheme(theme);
@@ -123,61 +112,8 @@ export default function App() {
     setTheme((current) => flipTheme(current));
   }
 
-  function clampSidebarWidth(width: number) {
-    const maxByViewport = Math.max(SIDEBAR_WIDTH_MIN, window.innerWidth - 320);
-    return Math.round(
-      Math.min(SIDEBAR_WIDTH_MAX, maxByViewport, Math.max(SIDEBAR_WIDTH_MIN, width)),
-    );
-  }
-
-  function onSidebarResizeStart(e: React.PointerEvent<HTMLDivElement>) {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = sidebarWidthRef.current;
-    const handle = e.currentTarget;
-    handle.setPointerCapture(e.pointerId);
-    document.body.classList.add("sidebar-resizing");
-
-    const onMove = (ev: PointerEvent) => {
-      const delta = startX - ev.clientX;
-      setSidebarWidth(clampSidebarWidth(startWidth + delta));
-    };
-
-    const onEnd = (ev: PointerEvent) => {
-      if (handle.hasPointerCapture(ev.pointerId)) {
-        handle.releasePointerCapture(ev.pointerId);
-      }
-      document.body.classList.remove("sidebar-resizing");
-      persistSidebarWidth(sidebarWidthRef.current);
-      handle.removeEventListener("pointermove", onMove);
-      handle.removeEventListener("pointerup", onEnd);
-      handle.removeEventListener("pointercancel", onEnd);
-    };
-
-    handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onEnd);
-    handle.addEventListener("pointercancel", onEnd);
-  }
-
-  function resetSidebarWidth() {
-    setSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
-    persistSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
-  }
-
-  function openSidebar(tab?: SidebarTab) {
-    setSidebarOpen(true);
-    persistSidebarVisible(true);
-    if (tab) setSidebarTab(tab);
-  }
-
-  function closeSidebar() {
-    setSidebarOpen(false);
-    persistSidebarVisible(false);
-  }
-
-  function toggleSidebar() {
-    if (sidebarOpen) closeSidebar();
-    else openSidebar();
+  function navigateTo(view: AppView) {
+    setAppView(view);
   }
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [jobName, setJobName] = useState("");
@@ -438,9 +374,9 @@ export default function App() {
     if (!selectedModelId && models.length === 0) {
       pushMessage({
         role: "assistant",
-        content: "请先在「设置」中配置模型（API Key + Base URL + Model ID）",
+        content: "请先在「模型」中配置 API（API Key + Base URL + Model ID）",
       });
-      openSidebar("settings");
+      navigateTo("models");
       return;
     }
     setLoading(true);
@@ -548,27 +484,66 @@ export default function App() {
     }
   }
 
-  const tabs: { id: SidebarTab; label: string; icon: MacoIconName; desc: string }[] = [
-    { id: "sessions", label: "会话", icon: "sessions", desc: "历史对话与切换" },
-    { id: "tasks", label: "任务", icon: "tasks", desc: "计划、待办与附件" },
+  const toolbarItems: { id: AppView; label: string; icon: MacoIconName; desc: string }[] = [
+    { id: "chat", label: "会话", icon: "sessions", desc: "当前对话与历史会话" },
     { id: "memory", label: "记忆", icon: "memory", desc: "长期记忆读写" },
     { id: "skills", label: "技能", icon: "skills", desc: "本地 Skill 文件" },
     { id: "usage", label: "用量", icon: "usage", desc: "Token 与费用统计" },
     { id: "jobs", label: "调度", icon: "jobs", desc: "定时后台任务" },
-    { id: "settings", label: "设置", icon: "settings", desc: "模型、MCP 与鉴权" },
+    { id: "models", label: "模型", icon: "models", desc: "LLM 提供商与 API Key" },
+    { id: "mcp", label: "MCP", icon: "mcp", desc: "MCP 服务连接与重载" },
+    { id: "toolPolicies", label: "策略", icon: "toolPolicies", desc: "工具 HITL 确认策略" },
+    { id: "settings", label: "设置", icon: "settings", desc: "外观、鉴权与 API 文档" },
   ];
 
-  const activeTab = tabs.find((t) => t.id === sidebarTab) ?? tabs[0];
-
-  const shellStyle = sidebarOpen
-    ? ({ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties)
-    : undefined;
+  const activeTool = toolbarItems.find((t) => t.id === appView) ?? toolbarItems[0];
 
   return (
-    <div className={`app-shell${sidebarOpen ? "" : " sidebar-closed"}`} style={shellStyle}>
-      <div className="app-main">
+    <div className="app-shell">
+      <nav className="app-toolbar-left" aria-label="工具栏">
+        {toolbarItems.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={`toolbar-tab ${appView === t.id ? "active" : ""}`}
+            onClick={() => navigateTo(t.id)}
+            title={t.desc}
+          >
+            <span className="toolbar-tab-icon">
+              <MacoIcon name={t.icon} size={18} />
+            </span>
+            <span className="toolbar-tab-label">{t.label}</span>
+          </button>
+        ))}
+      </nav>
+
+      <div className="app-workspace">
+        {appView === "chat" ? (
+          <div className="chat-workspace">
+            <div className="chat-main">
         <header className="app-topbar">
           <div className="app-logo">ma<span>co</span></div>
+          <select
+            className="model-select session-select"
+            value={sessionId ?? ""}
+            onChange={(e) => {
+              const id = e.target.value;
+              if (!id) return;
+              const s = sessions.find((x) => x.session_id === id);
+              loadSession(id, s?.model_id, s?.project_root);
+            }}
+            title="切换会话"
+          >
+            {sessions.length === 0 ? (
+              <option value="">暂无会话</option>
+            ) : (
+              sessions.map((s) => (
+                <option key={s.session_id} value={s.session_id}>
+                  {s.title ?? s.session_id.slice(0, 8)}
+                </option>
+              ))
+            )}
+          </select>
           {sessionId && (
             editingTitle ? (
               <input
@@ -597,10 +572,22 @@ export default function App() {
               </button>
             )
           )}
-          {sessionId && currentSession?.project_root && (
-            <span className="topbar-project" title={currentSession.project_root}>
-              项目: {currentSession.project_root}
-            </span>
+          {sessionId && (
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              title="删除当前会话"
+              onClick={async () => {
+                if (!confirm("确定删除该会话？")) return;
+                await deleteSession(sessionId);
+                reset();
+                setLastSessionId(null);
+                setArtifacts([]);
+                setSessions(await listSessions());
+              }}
+            >
+              删除
+            </button>
           )}
           <select
             className="model-select"
@@ -609,7 +596,7 @@ export default function App() {
             title="对话模型"
           >
             {models.length === 0 ? (
-              <option value="">无模型 — 请打开设置</option>
+              <option value="">无模型 — 请打开「模型」</option>
             ) : (
               models
                 .filter((m) => m.enabled)
@@ -673,33 +660,27 @@ export default function App() {
             >
               <MacoIcon name={theme === "dark" ? "sun" : "moon"} size={18} />
             </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-ghost sidebar-toggle"
-              onClick={toggleSidebar}
-              aria-expanded={sidebarOpen}
-              title={sidebarOpen ? "收起右侧工具栏" : "展开右侧工具栏"}
-            >
-              <MacoIcon name={sidebarOpen ? "panel-left" : "panel-right"} size={16} />
-              {sidebarOpen ? "收起面板" : "工具面板"}
-            </button>
-            <button type="button" className="btn btn-sm" onClick={() => openSidebar("settings")}>
-              <MacoIcon name="settings" size={16} />
-              设置
-            </button>
           </div>
         </header>
+
+        <SessionProjectBar
+          projectRootDraft={projectRootDraft}
+          pickingFolder={pickingFolder}
+          hasSession={Boolean(sessionId)}
+          onPickFolder={pickProjectFolder}
+          onClear={clearProjectRoot}
+        />
 
         <div className="chat-scroll">
           {messages.length === 0 ? (
             <div className="chat-empty">
               <h2>个人 Agent</h2>
-              <p>在设置中配置模型后即可开始对话。</p>
+              <p>在「模型」工具中配置 API 后即可开始对话。</p>
               {models.length === 0 && (
                 <button
                   type="button"
                   className="btn btn-primary"
-                  onClick={() => openSidebar("settings")}
+                  onClick={() => navigateTo("models")}
                 >
                   添加模型
                 </button>
@@ -819,206 +800,28 @@ export default function App() {
             </button>
           </div>
         </div>
-      </div>
-
-      {sidebarOpen && (
-        <div className="sidebar-column">
-          <div
-            className="sidebar-resizer"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="调节侧栏宽度"
-            aria-valuenow={sidebarWidth}
-            aria-valuemin={SIDEBAR_WIDTH_MIN}
-            aria-valuemax={SIDEBAR_WIDTH_MAX}
-            title="拖拽调节宽度，双击恢复默认"
-            onPointerDown={onSidebarResizeStart}
-            onDoubleClick={resetSidebarWidth}
-          />
-          <aside className="app-sidebar">
-        <nav className="sidebar-nav" aria-label="侧栏导航">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className={`sidebar-tab ${sidebarTab === t.id ? "active" : ""}`}
-              onClick={() => openSidebar(t.id)}
-              title={t.desc}
-            >
-              <span className="sidebar-tab-icon">
-                <MacoIcon name={t.icon} size={18} />
-              </span>
-              <span className="sidebar-tab-label">{t.label}</span>
-            </button>
-          ))}
-        </nav>
-
-        <div className="sidebar-body">
-          <div className="sidebar-header">
-            <div className="sidebar-header-text">
-              <h2>{activeTab.label}</h2>
-              <p>{activeTab.desc}</p>
             </div>
-            <button
-              type="button"
-              className="btn btn-ghost btn-icon sidebar-close"
-              onClick={closeSidebar}
-              title="收起工具栏"
-              aria-label="收起工具栏"
-            >
-              <MacoIcon name="x" size={16} />
-            </button>
+            <TasksDock
+              plan={plan}
+              todos={todos}
+              artifacts={artifacts}
+              sessionId={sessionId}
+              onPreviewArtifact={setPreviewArtifactItem}
+              onPatchTodo={async (taskKey, status) => {
+                if (!sessionId) return;
+                await patchTodo(sessionId, taskKey, status);
+                await refreshTasks(sessionId);
+              }}
+            />
           </div>
-
-          <div className="sidebar-panel">
-          {sidebarTab === "sessions" && (
-            <div className="panel-section">
-              {sessions.length === 0 ? (
-                <p className="panel-empty">暂无会话，发送第一条消息即可创建。</p>
-              ) : (
-                sessions.map((s) => (
-                  <div key={s.session_id} className="session-row">
-                    <button
-                      type="button"
-                      className={`panel-card panel-card--clickable ${sessionId === s.session_id ? "active" : ""}`}
-                      onClick={() => loadSession(s.session_id, s.model_id, s.project_root)}
-                    >
-                      <span className="session-title">{s.title ?? s.session_id.slice(0, 8)}</span>
-                      {s.project_root && (
-                        <div className="model-meta session-project" title={s.project_root}>
-                          {s.project_root}
-                        </div>
-                      )}
-                      <div className="model-meta">{s.updated_at}</div>
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-ghost session-delete"
-                      title="删除会话"
-                      aria-label="删除会话"
-                      onClick={async () => {
-                        if (!confirm("确定删除该会话？")) return;
-                        await deleteSession(s.session_id);
-                        if (sessionId === s.session_id) {
-                          reset();
-                          setLastSessionId(null);
-                          setArtifacts([]);
-                        }
-                        setSessions(await listSessions());
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))
-              )}
-              <div className="panel-actions">
-                <button
-                  type="button"
-                  className="btn btn-sm btn-primary btn-block"
-                  onClick={() => {
-                    reset();
-                    setLastSessionId(null);
-                    setArtifacts([]);
-                    setPlan("");
-                    setTodos([]);
-                    setProjectRootDraft("");
-                  }}
-                >
-                  新对话
-                </button>
-              </div>
-              <div className="panel-section" style={{ marginTop: 16 }}>
-                <h3>项目路径</h3>
-                <p className="panel-empty" style={{ paddingTop: 0 }}>
-                  选择本地项目文件夹后，bash 默认在该目录执行，并自动加入 MCP filesystem 允许列表。
-                  {!sessionId && " 可在发首条消息前选择，新建会话时会一并保存。"}
-                </p>
-                {projectRootDraft ? (
-                  <div className="project-path-display" title={projectRootDraft}>
-                    {projectRootDraft}
-                  </div>
-                ) : (
-                  <p className="project-path-empty">未选择项目文件夹</p>
-                )}
-                <div className="panel-actions">
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-primary"
-                    onClick={pickProjectFolder}
-                    disabled={pickingFolder}
-                  >
-                    {pickingFolder ? "选择中…" : "选择文件夹"}
-                  </button>
-                  {projectRootDraft && (
-                    <button type="button" className="btn btn-sm" onClick={clearProjectRoot}>
-                      清除
-                    </button>
-                  )}
-                </div>
-              </div>
+        ) : (
+          <div className="tool-workspace">
+            <div className="tool-workspace-header">
+              <h2>{activeTool.label}</h2>
+              <p>{activeTool.desc}</p>
             </div>
-          )}
-
-          {sidebarTab === "tasks" && (
-            <>
-              <div className="panel-section">
-                <h3>文件产物</h3>
-                {artifacts.length === 0 ? (
-                  <p className="panel-empty">Agent 执行时写入的文件会出现在这里，点击可预览内容。</p>
-                ) : (
-                  artifacts.map((a) => (
-                    <button
-                      key={a.id}
-                      type="button"
-                      className="artifact-card"
-                      onClick={() => sessionId && setPreviewArtifactItem(a)}
-                      disabled={!sessionId}
-                    >
-                      <strong>{a.filename}</strong>
-                      <div className="model-meta">
-                        {a.mime_type} · {(a.size_bytes / 1024).toFixed(1)} KB
-                      </div>
-                    </button>
-                  ))
-                )}
-              </div>
-              <div className="panel-section">
-                <h3>计划</h3>
-                <div className="panel-card">
-                  <pre className="panel-pre">{plan || "暂无计划"}</pre>
-                </div>
-              </div>
-              <div className="panel-section">
-                <h3>待办</h3>
-                {todos.length === 0 ? (
-                  <p className="panel-empty">暂无待办</p>
-                ) : (
-                  todos.map((t) => (
-                    <div key={t.task_key} className="todo-item">
-                      <div>{t.title}</div>
-                      <select
-                        value={t.status}
-                        onChange={async (e) => {
-                          if (!sessionId) return;
-                          await patchTodo(sessionId, t.task_key, e.target.value);
-                          await refreshTasks(sessionId);
-                        }}
-                      >
-                        <option value="pending">待处理</option>
-                        <option value="in_progress">进行中</option>
-                        <option value="completed">已完成</option>
-                      </select>
-                    </div>
-                  ))
-                )}
-              </div>
-            </>
-          )}
-
-          {sidebarTab === "skills" && <SkillsPanel />}
-
-          {sidebarTab === "memory" && (
+            <div className="tool-workspace-panel">
+          {appView === "memory" && (
             <div className="panel-section">
               <h3>长期记忆</h3>
               {memories.map((m) => (
@@ -1121,7 +924,9 @@ export default function App() {
             </div>
           )}
 
-          {sidebarTab === "usage" && (
+          {appView === "skills" && <SkillsPanel />}
+
+          {appView === "usage" && (
             <div className="panel-section">
               <h3>Token 用量</h3>
               {usage.length === 0 ? (
@@ -1140,7 +945,7 @@ export default function App() {
             </div>
           )}
 
-          {sidebarTab === "jobs" && (
+          {appView === "jobs" && (
             <div className="panel-section">
               <h3>定时任务</h3>
               {jobs.map((j) => (
@@ -1197,7 +1002,22 @@ export default function App() {
             </div>
           )}
 
-          {sidebarTab === "settings" && (
+          {appView === "models" && (
+            <ModelSettings
+              models={models}
+              onChange={(list) => {
+                setModels(list);
+                const def = list.find((m) => m.is_default) ?? list[0];
+                if (def) setSelectedModelId(def.id);
+              }}
+            />
+          )}
+
+          {appView === "mcp" && <McpSettings />}
+
+          {appView === "toolPolicies" && <ToolPolicySettings />}
+
+          {appView === "settings" && (
             <>
               <div className="panel-section">
                 <h3>外观</h3>
@@ -1223,16 +1043,6 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              <ModelSettings
-                models={models}
-                onChange={(list) => {
-                  setModels(list);
-                  const def = list.find((m) => m.is_default) ?? list[0];
-                  if (def) setSelectedModelId(def.id);
-                }}
-              />
-              <McpSettings />
-              <ToolPolicySettings />
               <div className="panel-section" style={{ marginTop: 16 }}>
                 <h3>API Token</h3>
                 {getApiToken() ? (
@@ -1295,11 +1105,10 @@ export default function App() {
               </div>
             </>
           )}
+            </div>
           </div>
-        </div>
-          </aside>
-        </div>
-      )}
+        )}
+      </div>
 
       {previewArtifactItem && sessionId && (
         <ArtifactPreviewModal

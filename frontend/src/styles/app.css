@@ -10,10 +10,205 @@
 
 .app-shell {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--sidebar-width, 480px);
+  grid-template-columns: 72px minmax(0, 1fr);
   height: 100vh;
   background: var(--bg);
   color: var(--text);
+}
+
+.app-toolbar-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 8px;
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+  overflow-y: auto;
+  z-index: 10;
+}
+
+.toolbar-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 4px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+
+.toolbar-tab:hover {
+  background: var(--surface-hover);
+  color: var(--text-h);
+}
+
+.toolbar-tab.active {
+  color: var(--accent);
+  background: var(--accent-bg);
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+
+.toolbar-tab-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: var(--icon-bg);
+  color: var(--text-muted);
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+
+.toolbar-tab:hover .toolbar-tab-icon {
+  color: var(--text-h);
+  background: var(--icon-bg-hover);
+}
+
+.toolbar-tab.active .toolbar-tab-icon {
+  color: var(--accent);
+  background: var(--icon-bg-active);
+  box-shadow: inset 0 0 0 1px var(--icon-ring-active);
+}
+
+.toolbar-tab-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-workspace {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chat-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  flex: 1;
+  min-height: 0;
+}
+
+.chat-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+}
+
+.tasks-dock {
+  overflow-y: auto;
+  background: var(--surface);
+  padding: 12px 14px;
+  min-height: 0;
+}
+
+.tasks-dock-header {
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tasks-dock-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.tasks-dock-header p {
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.tool-workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+}
+
+.tool-workspace-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.tool-workspace-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.tool-workspace-header p {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.tool-workspace-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  min-height: 0;
+}
+
+.session-select {
+  max-width: 180px;
+}
+
+.session-project-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 0.8rem;
+}
+
+.session-project-bar-label {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.session-project-bar-path {
+  flex: 1;
+  min-width: 120px;
+  margin-bottom: 0;
+  max-width: 360px;
+}
+
+.session-project-bar-empty {
+  color: var(--text-muted);
+}
+
+.session-project-bar-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.session-project-bar-hint {
+  width: 100%;
+  font-size: 0.75rem;
+  color: var(--text-muted);
 }
 
 .app-shell.sidebar-closed {
@@ -71,7 +266,8 @@ body.sidebar-resizing .sidebar-resizer::after {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  border-right: 1px solid var(--border);
+  flex: 1;
+  min-height: 0;
 }
 
 .app-topbar {
@@ -889,32 +1085,26 @@ body.sidebar-resizing .sidebar-resizer::after {
 }
 
 @media (max-width: 900px) {
-  .app-shell:not(.sidebar-closed) {
+  .app-shell {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+
+  .chat-workspace {
     grid-template-columns: 1fr;
-    grid-template-rows: 1fr auto;
-    height: auto;
-    min-height: 100vh;
+    grid-template-rows: minmax(0, 1fr) auto;
   }
 
-  .sidebar-resizer {
-    display: none;
+  .tasks-dock {
+    max-height: 40vh;
+    border-top: 1px solid var(--border);
   }
 
-  .sidebar-column {
-    max-height: 50vh;
-  }
-
-  .app-sidebar {
-    max-height: 50vh;
-    grid-template-columns: 72px minmax(0, 1fr);
-  }
-
-  .sidebar-tab {
+  .toolbar-tab {
     min-height: 48px;
     font-size: 0.625rem;
   }
 
-  .sidebar-tab-icon {
+  .toolbar-tab-icon {
     width: 28px;
     height: 28px;
     border-radius: 8px;

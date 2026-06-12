@@ -7,6 +7,9 @@ export type MacoIconName =
   | "skills"
   | "usage"
   | "jobs"
+  | "models"
+  | "mcp"
+  | "toolPolicies"
   | "settings"
   | "paperclip"
   | "x"
@@ -91,6 +94,35 @@ export function MacoIcon({ name, size = 20, className }: MacoIconProps) {
           <circle cx="12" cy="12" r="8" />
           <path d="M12 8v4l2.5 2.5" />
           <path d="M16 3.5l1.5 1.5" />
+        </svg>
+      );
+    case "models":
+      return (
+        <svg {...p}>
+          <path d="M12 3v4" />
+          <path d="M8 7h8" />
+          <rect x="5" y="7" width="14" height="10" rx="2" />
+          <path d="M9 12h.01" />
+          <path d="M12 12h.01" />
+          <path d="M15 12h.01" />
+          <path d="M8 17h8" />
+        </svg>
+      );
+    case "mcp":
+      return (
+        <svg {...p}>
+          <circle cx="6" cy="12" r="2.5" />
+          <circle cx="18" cy="7" r="2.5" />
+          <circle cx="18" cy="17" r="2.5" />
+          <path d="M8.5 11.2 15.5 8.2" />
+          <path d="M8.5 12.8 15.5 15.8" />
+        </svg>
+      );
+    case "toolPolicies":
+      return (
+        <svg {...p}>
+          <path d="M12 3 4 7v6c0 5 3.5 7.5 8 8 4.5-.5 8-3 8-8V7l-8-4z" />
+          <path d="M9 12l2 2 4-4" />
         </svg>
       );
     case "settings":
