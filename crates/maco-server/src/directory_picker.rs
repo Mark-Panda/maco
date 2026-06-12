@@ -8,11 +8,15 @@ pub fn pick_directory_blocking() -> Option<PathBuf> {
     {
         return pick_directory_macos();
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), feature = "native-dialog"))]
     {
-        rfd::FileDialog::new()
+        return rfd::FileDialog::new()
             .set_title("选择项目文件夹")
-            .pick_folder()
+            .pick_folder();
+    }
+    #[cfg(all(not(target_os = "macos"), not(feature = "native-dialog")))]
+    {
+        None
     }
 }
 

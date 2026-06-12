@@ -1,12 +1,10 @@
-# syntax=docker/dockerfile:1
-
 # 构建阶段：adk-rust 1.0.0 要求 rustc >= 1.94
 FROM rust:1.94-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
-RUN cargo build --release -p maco-server \
+RUN cargo build --release -p maco-server --no-default-features \
     && strip /app/target/release/maco-server
 
 # 运行阶段
@@ -25,14 +23,13 @@ RUN set -eux; \
       echo "apt-get update failed (attempt ${i}), retry in 5s..."; \
       sleep 5; \
     done; \
-    apt-get install -y --no-install-recommends ca-certificates curl bash; \
+    apt-get install -y --no-install-recommends ca-certificates curl bash gosu; \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 1000 -s /bin/bash maco
 COPY --from=builder /app/target/release/maco-server /usr/local/bin/maco-server
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-USER maco
 WORKDIR /home/maco
 ENV HOME=/home/maco
 EXPOSE 8080

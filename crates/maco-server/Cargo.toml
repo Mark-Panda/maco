@@ -35,6 +35,9 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 utoipa = { version = "5.5.0", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }
+rfd = { workspace = true, optional = true }
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-rfd = { workspace = true }
+[features]
+default = ["native-dialog"]
+# 本机文件夹选择器（Linux/Windows）；Docker 部署请 `--no-default-features`
+native-dialog = ["dep:rfd"]
