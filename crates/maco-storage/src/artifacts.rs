@@ -1,22 +1,45 @@
-//! 会话附件：磁盘存储 + `maco_artifacts` 元数据。
+//! 会话附件：maco DB + 磁盘布局，并同步 ADK `FileArtifactService`。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use maco_core::{MacoError, MacoResult};
+use adk_artifact::{ArtifactService, FileArtifactService, SaveRequest};
+use adk_core::Part;
+use maco_core::{MacoError, MacoResult, APP_NAME, USER_ID};
 use maco_db::{ArtifactRecord, ArtifactRepo};
 use maco_governance::{mime_for_artifact, validate_artifact};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// 按 `session_id/artifact_id` 组织文件，并与 DB 记录同步。
+/// 是否将 Runner 接入 ADK artifact（`MACO_ADK_ARTIFACTS=0` 关闭）。
+pub fn adk_artifacts_enabled() -> bool {
+    !matches!(
+        std::env::var("MACO_ADK_ARTIFACTS").as_deref(),
+        Ok("0") | Ok("false") | Ok("off")
+    )
+}
+
+/// 按 `session_id/artifact_id` 组织文件，并与 DB / ADK 服务同步。
 pub struct ArtifactStore {
     base_dir: PathBuf,
     repo: ArtifactRepo,
+    adk: Arc<dyn ArtifactService>,
 }
 
 impl ArtifactStore {
-    pub fn new(base_dir: PathBuf, repo: ArtifactRepo) -> Self {
-        Self { base_dir, repo }
+    pub fn new(base_dir: PathBuf, repo: ArtifactRepo) -> MacoResult<Self> {
+        let adk_inner = FileArtifactService::new(&base_dir)
+            .map_err(|e| MacoError::Adk(e.to_string()))?;
+        Ok(Self {
+            base_dir,
+            repo,
+            adk: Arc::new(adk_inner),
+        })
+    }
+
+    /// ADK `ArtifactService`（供 `Runner` 与 `LoadArtifactsTool`）。
+    pub fn adk_service(&self) -> Arc<dyn ArtifactService> {
+        self.adk.clone()
     }
 
     pub fn storage_path(&self, session_id: &str, artifact_id: &str) -> PathBuf {
@@ -43,7 +66,8 @@ impl ArtifactStore {
             .map_err(|e| MacoError::config(format!("write artifact: {e}")))?;
 
         let checksum = hex::encode(Sha256::digest(bytes));
-        self.repo
+        let record = self
+            .repo
             .insert(
                 session_id,
                 filename,
@@ -52,7 +76,18 @@ impl ArtifactStore {
                 &path.display().to_string(),
                 Some(&checksum),
             )
-            .await
+            .await?;
+
+        if adk_artifacts_enabled() {
+            if let Err(e) = self
+                .sync_adk(session_id, filename, mime_type, bytes)
+                .await
+            {
+                tracing::warn!("adk artifact sync on save: {e}");
+            }
+        }
+
+        Ok(record)
     }
 
     pub fn base_dir(&self) -> &Path {
@@ -80,7 +115,10 @@ impl ArtifactStore {
         }
         let checksum = hex::encode(Sha256::digest(&bytes));
         let existing = self.repo.list_for_session(session_id).await?;
-        if existing.iter().any(|r| r.checksum.as_deref() == Some(checksum.as_str())) {
+        if existing
+            .iter()
+            .any(|r| r.checksum.as_deref() == Some(checksum.as_str()))
+        {
             return Ok(None);
         }
         let filename = source_path
@@ -112,5 +150,30 @@ impl ArtifactStore {
         let bytes = std::fs::read(&record.storage_path)
             .map_err(|e| MacoError::config(format!("read artifact: {e}")))?;
         Ok((record, bytes))
+    }
+
+    async fn sync_adk(
+        &self,
+        session_id: &str,
+        filename: &str,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> MacoResult<()> {
+        let req = SaveRequest {
+            app_name: APP_NAME.into(),
+            user_id: USER_ID.into(),
+            session_id: session_id.into(),
+            file_name: filename.into(),
+            part: Part::InlineData {
+                mime_type: mime_type.into(),
+                data: bytes.to_vec(),
+            },
+            version: None,
+        };
+        self.adk
+            .save(req)
+            .await
+            .map_err(|e| MacoError::Adk(e.to_string()))?;
+        Ok(())
     }
 }

@@ -59,7 +59,7 @@ pub struct ModelViewDoc {
     pub id: String,
     /// 显示名称。
     pub name: String,
-    /// 提供商：`openai` / `anthropic`。
+    /// 提供商：`openai` / `anthropic` / `gemini` / `openrouter`。
     pub provider: String,
     /// 上游模型标识。
     pub model_id: String,

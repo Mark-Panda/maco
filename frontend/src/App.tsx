@@ -109,7 +109,9 @@ export default function App() {
   } | null>(null);
   const [elicitationInput, setElicitationInput] = useState("{}");
   const [usage, setUsage] = useState<Array<{ key: string; total_tokens: number; estimated_cost: number }>>([]);
+  const [usageError, setUsageError] = useState<string | null>(null);
   const [memories, setMemories] = useState<Array<{ id: number; content: string; timestamp: string }>>([]);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
   const [memoryInput, setMemoryInput] = useState("");
   const [memoryDeleteQ, setMemoryDeleteQ] = useState("");
   const [models, setModels] = useState<ModelView[]>([]);
@@ -126,11 +128,47 @@ export default function App() {
     setTheme((current) => flipTheme(current));
   }
 
+  function refreshUsage() {
+    return fetchUsageSummary("model")
+      .then((rows) => {
+        setUsage(
+          rows.map((r) => ({
+            key: r.key,
+            total_tokens: r.total_tokens,
+            estimated_cost: r.estimated_cost,
+          })),
+        );
+        setUsageError(null);
+      })
+      .catch((err: unknown) => {
+        setUsage([]);
+        setUsageError(err instanceof Error ? err.message : "加载用量失败");
+      });
+  }
+
+  function refreshMemories() {
+    return fetchMemories()
+      .then((r) => {
+        setMemories(r.items);
+        setMemoryError(null);
+      })
+      .catch((err: unknown) => {
+        setMemories([]);
+        setMemoryError(err instanceof Error ? err.message : "加载记忆失败");
+      });
+  }
+
   function navigateTo(view: AppView) {
     setAppView(view);
     if (view === "chat" && sessionId) {
       refreshTasks(sessionId).catch(() => undefined);
       listArtifacts(sessionId).then(setArtifacts).catch(() => setArtifacts([]));
+    }
+    if (view === "usage") {
+      refreshUsage().catch(() => undefined);
+    }
+    if (view === "memory") {
+      refreshMemories().catch(() => undefined);
     }
   }
   const [jobs, setJobs] = useState<JobRecord[]>([]);
@@ -212,20 +250,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetchUsageSummary("model")
-      .then((rows) =>
-        setUsage(
-          rows.map((r) => ({
-            key: r.key,
-            total_tokens: r.total_tokens,
-            estimated_cost: r.estimated_cost,
-          })),
-        ),
-      )
-      .catch(() => setUsage([]));
-    fetchMemories()
-      .then((r) => setMemories(r.items))
-      .catch(() => setMemories([]));
+    refreshUsage().catch(() => undefined);
+    refreshMemories().catch(() => undefined);
     fetchJobs()
       .then(setJobs)
       .catch(() => setJobs([]));
@@ -823,6 +849,11 @@ export default function App() {
           {appView === "memory" && (
             <div className="panel-section">
               <h3>长期记忆</h3>
+              {memoryError ? (
+                <p className="panel-empty panel-error">{memoryError}</p>
+              ) : memories.length === 0 ? (
+                <p className="panel-empty">暂无记忆。可在下方手动添加，或由 Agent 在对话中写入长期记忆。</p>
+              ) : null}
               {memories.map((m) => (
                 <div key={m.id} className="memory-item">
                   <div className="memory-time">{m.timestamp}</div>
@@ -844,8 +875,7 @@ export default function App() {
                 onClick={async () => {
                   await addMemory(memoryInput.trim());
                   setMemoryInput("");
-                  const r = await fetchMemories();
-                  setMemories(r.items);
+                  await refreshMemories();
                 }}
               >
                 保存
@@ -912,8 +942,7 @@ export default function App() {
                   onClick={async () => {
                     await deleteMemories(memoryDeleteQ.trim());
                     setMemoryDeleteQ("");
-                    const r = await fetchMemories();
-                    setMemories(r.items);
+                    await refreshMemories();
                     setMemorySearchHits([]);
                   }}
                 >
@@ -928,8 +957,10 @@ export default function App() {
           {appView === "usage" && (
             <div className="panel-section">
               <h3>Token 用量</h3>
-              {usage.length === 0 ? (
-                <p className="panel-empty">暂无用量数据</p>
+              {usageError ? (
+                <p className="panel-empty panel-error">{usageError}</p>
+              ) : usage.length === 0 ? (
+                <p className="panel-empty">暂无用量数据。完成至少一次对话后，模型调用的 token 会汇总显示在这里。</p>
               ) : (
                 usage.map((u) => (
                   <div key={u.key} className="stat-row">

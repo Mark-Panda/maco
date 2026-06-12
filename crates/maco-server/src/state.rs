@@ -5,17 +5,18 @@ use std::sync::Arc;
 use maco_db::{
     init_pool, rebuild_filesystem_mcp_roots, seed_default_filesystem_mcp, seed_defaults,
     seed_tool_policies, ApiTokenRepo, ArtifactRepo, CallbackLogRepo, ElicitationRepo, JobRepo,
-    McpServerRepo, ModelRepo, ReactRepo, RunRepo, SessionMetaRepo, SettingsRepo, ToolPolicyRepo,
-    UsageRepo,
+    McpServerRepo, ModelRepo, ReactRepo, RunRepo, SessionMetaRepo, SettingsRepo, SkillRepo,
+    ToolPolicyRepo, UsageRepo,
 };
 use maco_governance::auth_disabled;
 use maco_harness::{
     DynamicElicitationHandler, ElicitationBroker, MacoHarness, McpPool, RunOrchestrator,
-    RunStreamRegistry,
+    AdkSkillManager, RunStreamRegistry,
 };
 use maco_storage::{AdkStorage, ArtifactStore};
 
 use crate::session_facade::SessionFacade;
+use crate::skills_sync;
 
 /// Axum `State` 注入的共享上下文（各 HTTP handler 通过 `State<AppState>` 访问）。
 #[derive(Clone)]
@@ -44,6 +45,10 @@ pub struct AppState {
     pub mcp_servers: McpServerRepo,
     /// HITL 工具策略仓库。
     pub tool_policies: ToolPolicyRepo,
+    /// Skill 元数据与启用状态。
+    pub skills: SkillRepo,
+    /// ADK Skill 索引与启用状态。
+    pub adk_skills: Arc<AdkSkillManager>,
     /// adk Session/Memory 存储。
     pub adk: Arc<AdkStorage>,
     /// Session + Memory 门面。
@@ -94,7 +99,10 @@ impl AppState {
         let mcp_servers = McpServerRepo::new(db.pool.clone());
         seed_default_filesystem_mcp(&mcp_servers, &paths.tmp_dir).await?;
         let artifact_repo = ArtifactRepo::new(db.pool.clone());
-        let artifacts = Arc::new(ArtifactStore::new(paths.artifacts_dir.clone(), artifact_repo));
+        let artifacts = Arc::new(ArtifactStore::new(
+            paths.artifacts_dir.clone(),
+            artifact_repo,
+        )?);
 
         let facade = Arc::new(SessionFacade::new(adk.clone(), SessionMetaRepo::new(db.pool.clone())));
         facade.reconcile().await?;
@@ -121,6 +129,9 @@ impl AppState {
             tracing::warn!("mcp pool initial reload: {e}");
         }
 
+        let skills = SkillRepo::new(db.pool.clone());
+        let adk_skills = Arc::new(AdkSkillManager::new());
+
         let adk_for_state = adk.clone();
         let harness = Arc::new(MacoHarness::new(
             adk,
@@ -135,7 +146,12 @@ impl AppState {
             paths.tmp_dir.clone(),
             SessionMetaRepo::new(db.pool.clone()),
             artifacts.clone(),
+            adk_skills.clone(),
         ));
+
+        if let Err(e) = skills_sync::sync_skills(&skills, adk_skills.as_ref(), None).await {
+            tracing::warn!("skill sync on startup: {e}");
+        }
 
         Ok(Self {
             bind_addr,
@@ -150,6 +166,8 @@ impl AppState {
             jobs,
             mcp_servers,
             tool_policies: tool_policies_repo,
+            skills,
+            adk_skills,
             adk: adk_for_state,
             facade,
             harness,

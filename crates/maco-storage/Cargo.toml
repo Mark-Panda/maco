@@ -10,6 +10,7 @@ maco-governance = { workspace = true }
 adk-session = { workspace = true }
 adk-memory = { workspace = true }
 adk-core = { workspace = true }
+adk-artifact = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

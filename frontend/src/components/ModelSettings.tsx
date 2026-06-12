@@ -6,14 +6,31 @@ import {
   upsertModel,
 } from "../api/client";
 
-const PROVIDER_DEFAULTS = {
+type Provider = ModelView["provider"];
+
+const PROVIDER_DEFAULTS: Record<
+  Provider,
+  { model_id: string; base_url: string; api_key_env: string }
+> = {
   openai: {
     model_id: "gpt-4o-mini",
     base_url: "https://api.openai.com/v1",
+    api_key_env: "OPENAI_API_KEY",
   },
   anthropic: {
     model_id: "claude-sonnet-4-6",
     base_url: "https://api.anthropic.com",
+    api_key_env: "ANTHROPIC_API_KEY",
+  },
+  gemini: {
+    model_id: "gemini-2.5-flash",
+    base_url: "",
+    api_key_env: "GOOGLE_API_KEY",
+  },
+  openrouter: {
+    model_id: "google/gemini-2.5-flash",
+    base_url: "https://openrouter.ai/api/v1",
+    api_key_env: "OPENROUTER_API_KEY",
   },
 };
 
@@ -26,7 +43,7 @@ export function ModelSettings({ models, onChange }: Props) {
   const [editing, setEditing] = useState<string | null>(null);
   const [form, setForm] = useState({
     name: "",
-    provider: "openai" as "openai" | "anthropic",
+    provider: "openai" as Provider,
     model_id: "",
     base_url: "",
     api_key: "",
@@ -63,7 +80,7 @@ export function ModelSettings({ models, onChange }: Props) {
       model_id: m.model_id,
       base_url: m.base_url ?? PROVIDER_DEFAULTS[m.provider].base_url,
       api_key: "",
-      api_key_env: m.api_key_env,
+      api_key_env: m.api_key_env || PROVIDER_DEFAULTS[m.provider].api_key_env,
       is_default: m.is_default,
     });
     setError("");
@@ -162,17 +179,20 @@ export function ModelSettings({ models, onChange }: Props) {
             <select
               value={form.provider}
               onChange={(e) => {
-                const p = e.target.value as "openai" | "anthropic";
+                const p = e.target.value as Provider;
                 setForm({
                   ...form,
                   provider: p,
                   model_id: PROVIDER_DEFAULTS[p].model_id,
                   base_url: PROVIDER_DEFAULTS[p].base_url,
+                  api_key_env: PROVIDER_DEFAULTS[p].api_key_env,
                 });
               }}
             >
               <option value="openai">OpenAI / 兼容</option>
               <option value="anthropic">Anthropic / 兼容</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="openrouter">OpenRouter</option>
             </select>
           </div>
           <div className="field">
@@ -183,14 +203,16 @@ export function ModelSettings({ models, onChange }: Props) {
               placeholder="gpt-4o-mini"
             />
           </div>
-          <div className="field">
-            <label>Base URL</label>
-            <input
-              value={form.base_url}
-              onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-              placeholder="https://api.openai.com/v1"
-            />
-          </div>
+          {form.provider !== "gemini" && (
+            <div className="field">
+              <label>Base URL</label>
+              <input
+                value={form.base_url}
+                onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                placeholder={PROVIDER_DEFAULTS[form.provider].base_url}
+              />
+            </div>
+          )}
           <div className="field">
             <label>API Key</label>
             <input

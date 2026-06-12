@@ -46,6 +46,53 @@ maco API returns `search_mode: "keyword"` explicitly.
 
 - `adk-rust 1.0.0` requires **Rust 1.94.0** (see `rust-toolchain.toml`)
 
+## Context compaction (P0-2)
+
+maco enables ADK Runner compaction via `maco-harness::compaction`:
+
+| Layer | ADK API | Default |
+|-------|---------|---------|
+| Cross-turn | `EventsCompactionConfig` + `LlmEventSummarizer` | every 5 invocations |
+| Intra-turn | `IntraCompactionConfig` + summarizer | 80k estimated tokens |
+| Overflow | `CompactionConfig` + `TruncationCompaction` | budget 96k tokens |
+
+Set `MACO_COMPACTION=0` to disable. Optional: `MACO_COMPACTION_INTERVAL`, `MACO_COMPACTION_OVERLAP`, `MACO_INTRA_COMPACTION_TOKENS`, `MACO_CONTEXT_BUDGET`.
+
+## Tool concurrency (P1-3)
+
+`RunConfig::tool_concurrency` via `maco-harness::tool_concurrency` (default on):
+
+- Global max parallel tools: 6 (`MACO_TOOL_CONCURRENCY_MAX`)
+- `bash` per-tool limit: 1 (`MACO_BASH_CONCURRENCY`)
+- Backpressure: `Queue` (or `MACO_TOOL_BACKPRESSURE=fail`)
+
+Set `MACO_TOOL_CONCURRENCY=0` to disable.
+
+## Telemetry (P1-2)
+
+`maco-telemetry::init_maco_tracing` at server startup:
+
+- `MACO_OTLP_ENDPOINT` set → OTLP tonic export (`adk-telemetry`)
+- otherwise → `AdkSpanLayer` + in-memory `AdkSpanExporter`
+
+`MacoCallbackLogger` DB audit remains unchanged.
+
+## ADK artifacts (P1-1)
+
+`FileArtifactService` rooted at `artifacts_dir`; uploads/capture sync to ADK via `SaveRequest`.
+`Runner::artifact_service` + `LoadArtifactsTool` on Agent. Set `MACO_ADK_ARTIFACTS=0` to disable.
+
+## LLM providers (P1-4)
+
+`model_factory::build_llm` supports:
+
+| provider | ADK client | `base_url` |
+|----------|------------|------------|
+| `openai` | `OpenAIClient` | optional compatible gateway |
+| `anthropic` | `AnthropicClient` | optional |
+| `gemini` | `GeminiModel` | N/A (Google AI API) |
+| `openrouter` | `OpenRouterClient` | optional, default OpenRouter |
+
 ## Decision
 
 Proceed with Phase 1 using `adk_session` / `adk_memory` directly; Phase 2 HITL via re-open run.

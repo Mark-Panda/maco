@@ -103,7 +103,7 @@ impl UsageRepo {
                     SUM(prompt_tokens) AS prompt_tokens,
                     SUM(completion_tokens) AS completion_tokens,
                     SUM(total_tokens) AS total_tokens,
-                    COALESCE(SUM(estimated_cost), 0) AS estimated_cost,
+                    CAST(COALESCE(SUM(estimated_cost), 0) AS REAL) AS estimated_cost,
                     COUNT(*) AS request_count
              FROM maco_usage_stats WHERE 1=1"
         );

@@ -54,6 +54,9 @@ pub fn required_scope_for_path(path: &str, method: &str) -> Option<&'static str>
     if path.starts_with("/api/models") && method != "GET" {
         return Some(SCOPE_ADMIN);
     }
+    if path.starts_with("/api/skills") && method != "GET" {
+        return Some(SCOPE_ADMIN);
+    }
     if path.starts_with("/api/chat") {
         return Some(SCOPE_CHAT);
     }

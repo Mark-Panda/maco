@@ -21,7 +21,7 @@
 
 - **Harness**：`Runner` + `LlmAgentBuilder` + `RunOrchestrator` + `McpPool`
 - **SessionFacade**：统一 adk session 与 maco meta 一致性（含补偿 reconcile）
-- **SKILL / MCP** 可插拔（Phase 1 Skill 仅文件扫描；MCP 走 DB）
+- **SKILL / MCP** 可插拔（Skill 走 ADK `adk-skill` 发现与自动注入；MCP 走 ADK `adk-tool` + DB 配置）
 - **ReAct**：plan/todo 经显式 Agent Tool + 用户 PATCH 完成态
 - **6 类 Callback 日志** + SSE 统一 Envelope
 - **Session / Memory**：adk SQLite（路径以 Phase 0 spike 为准）
@@ -81,7 +81,7 @@ artifacts_dir = "~/.maco/data/artifacts"
 | R20 Artifact 安全 | **20MB / MIME / 路径约束** | P1 |
 | R21 SSE 重连 | **GET run 含 last_seq + pending_tools** | P1 |
 | R22 plan 并发 | **version 乐观锁 409** | P1 |
-| R23 Skill 双源 | **P1 仅 ~/.maco/skills/** | P1 |
+| R23 Skill 双源 | **ADK 发现：项目 `.skills/`、`.claude/skills/` + `~/.maco/skills/`** | P1 |
 | R24 非原子备份 | **WAL checkpoint + best-effort** | P1 |
 | R25 adk 升级 | **pin 版本 + UPGRADING.md** | P1 |
 | R26 Phase1 偏大 | **1a Chat / 1b MCP+ReAct** | P1 |
@@ -210,7 +210,7 @@ Workspace、migrations、SessionFacade、三态 Run、Chat SSE、模型、127.0.
 
 ### Phase 1b（扩展）
 
-McpPool、ReAct Tools、Callback 日志、Skill 文件扫描、前端 MVP
+McpPool（ADK）、ReAct Tools、Callback 日志、Skill（ADK `with_skills`）、前端 MVP
 
 ### Phase 2
 

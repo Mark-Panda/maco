@@ -184,6 +184,8 @@ pub fn ensure_data_dirs(paths: &DataPaths) -> MacoResult<()> {
         .map_err(|e| MacoError::config(format!("create tmp dir: {e}")))?;
     std::fs::create_dir_all(paths.tmp_dir.join("sessions"))
         .map_err(|e| MacoError::config(format!("create tmp sessions dir: {e}")))?;
+    std::fs::create_dir_all(default_skills_dir())
+        .map_err(|e| MacoError::config(format!("create skills dir: {e}")))?;
     Ok(())
 }
 

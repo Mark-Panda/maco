@@ -18,12 +18,14 @@ version = "0.1.0"
 license = "MIT"
 
 [workspace.dependencies]
-adk-rust = { version = "=1.0.0", features = ["standard", "sqlite-memory"] }
+adk-rust = { version = "=1.0.0", features = ["standard", "sqlite-memory", "openrouter"] }
 adk-session = { version = "=1.0.0", features = ["sqlite"] }
 adk-memory = { version = "=1.0.0", features = ["sqlite-memory"] }
 adk-runner = { version = "=1.0.0" }
 adk-core = { version = "=1.0.0" }
 adk-tool = { version = "=1.0.0", features = ["mcp", "http-transport"] }
+adk-artifact = { version = "=1.0.0" }
+adk-telemetry = { version = "=1.0.0", features = ["otlp"] }
 axum = { version = "0.8", features = ["macros", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -43,6 +45,7 @@ clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
 glob = "0.3"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 hex = "0.4"
 mime_guess = "2"

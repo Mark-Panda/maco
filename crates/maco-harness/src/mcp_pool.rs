@@ -1,4 +1,5 @@
-//! MCP 连接管理：stdio 走 `McpServerManager`，sse 走 HTTP toolset。
+//! MCP 连接管理（ADK 原生）：`adk_tool::McpServerManager`（stdio）+ `McpHttpClientBuilder`（SSE）。
+//! maco 仅负责从 DB 加载配置并热重载。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

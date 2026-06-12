@@ -1,4 +1,4 @@
-//! 根据 `maco_models` 记录构造 adk OpenAI / Anthropic 客户端。
+//! 根据 `maco_models` 记录构造 adk LLM 客户端。
 
 use std::env;
 use std::sync::Arc;
@@ -6,6 +6,21 @@ use std::sync::Arc;
 use adk_rust::prelude::*;
 use maco_core::{api_key_from_config, MacoError, MacoResult};
 use maco_db::ModelRecord;
+
+/// 支持的模型提供商。
+pub const SUPPORTED_PROVIDERS: &[&str] = &["openai", "anthropic", "gemini", "openrouter"];
+
+/// 校验 provider 是否在支持列表中。
+pub fn validate_provider(provider: &str) -> MacoResult<()> {
+    if SUPPORTED_PROVIDERS.contains(&provider) {
+        Ok(())
+    } else {
+        Err(MacoError::config(format!(
+            "unsupported provider: {provider} (supported: {})",
+            SUPPORTED_PROVIDERS.join(", ")
+        )))
+    }
+}
 
 /// 优先使用模型 `config.api_key`，否则回退到 `api_key_env` 环境变量。
 fn resolve_api_key(model: &ModelRecord) -> MacoResult<String> {
@@ -26,8 +41,9 @@ fn resolve_api_key(model: &ModelRecord) -> MacoResult<String> {
     )))
 }
 
-/// 按 provider 构建 `Arc<dyn Llm>`，支持自定义 `base_url`（兼容 API 网关）。
+/// 按 provider 构建 `Arc<dyn Llm>`，支持自定义 `base_url`（OpenAI / Anthropic / OpenRouter）。
 pub fn build_llm(model: &ModelRecord) -> MacoResult<Arc<dyn Llm>> {
+    validate_provider(&model.provider)?;
     let api_key = resolve_api_key(model)?;
     match model.provider.as_str() {
         "openai" => {
@@ -47,6 +63,37 @@ pub fn build_llm(model: &ModelRecord) -> MacoResult<Arc<dyn Llm>> {
             let client = AnthropicClient::new(cfg).map_err(|e| MacoError::Adk(e.to_string()))?;
             Ok(Arc::new(client) as Arc<dyn Llm>)
         }
+        "gemini" => {
+            let client = GeminiModel::new(api_key, &model.model_id)
+                .map_err(|e| MacoError::Adk(e.to_string()))?;
+            Ok(Arc::new(client) as Arc<dyn Llm>)
+        }
+        "openrouter" => {
+            let mut cfg = OpenRouterConfig::new(api_key, &model.model_id);
+            if let Some(base) = model.base_url.as_ref().filter(|b| !b.trim().is_empty()) {
+                cfg = cfg.with_base_url(base);
+            }
+            let client =
+                OpenRouterClient::new(cfg).map_err(|e| MacoError::Adk(e.to_string()))?;
+            Ok(Arc::new(client) as Arc<dyn Llm>)
+        }
         other => Err(MacoError::config(format!("unsupported provider: {other}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_provider_accepts_known() {
+        for p in SUPPORTED_PROVIDERS {
+            validate_provider(p).expect("known provider");
+        }
+    }
+
+    #[test]
+    fn validate_provider_rejects_unknown() {
+        assert!(validate_provider("cohere").is_err());
     }
 }

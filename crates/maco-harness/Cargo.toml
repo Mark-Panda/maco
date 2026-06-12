@@ -15,10 +15,11 @@ maco-react = { workspace = true }
 maco-governance = { workspace = true }
 maco-telemetry = { workspace = true }
 adk-rust = { workspace = true }
-adk-agent = { version = "=1.0.0", features = ["guardrails"] }
+adk-agent = { version = "=1.0.0", features = ["guardrails", "skills"] }
+adk-skill = { version = "=1.0.0" }
 adk-session = { workspace = true }
 adk-memory = { workspace = true }
-adk-runner = { workspace = true }
+adk-runner = { workspace = true, features = ["context-compaction", "artifacts"] }
 adk-core = { workspace = true }
 adk-tool = { workspace = true }
 rmcp = { version = "1.6", default-features = false, features = ["client"] }
@@ -31,7 +32,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
-glob = { workspace = true }
+zip = { workspace = true }
 tempfile = "3"
 tracing-subscriber = { workspace = true }
 

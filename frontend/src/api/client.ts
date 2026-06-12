@@ -74,7 +74,7 @@ export function setLastModelId(id: string | null) {
 export type ModelView = {
   id: string;
   name: string;
-  provider: "openai" | "anthropic";
+  provider: "openai" | "anthropic" | "gemini" | "openrouter";
   model_id: string;
   base_url: string | null;
   api_key_env: string;
@@ -572,6 +572,16 @@ export type SkillSummary = {
   name: string;
   description: string;
   file_path: string;
+  updated_at?: string | null;
+  enabled: boolean;
+};
+
+export type SkillUploadResult = {
+  name: string;
+  description: string;
+  file_path: string;
+  extracted_files: number;
+  skill: SkillSummary;
 };
 
 export type ArtifactRecord = {
@@ -594,7 +604,41 @@ export async function fetchSkill(name: string) {
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error(await res.text());
-  return res.json() as Promise<SkillSummary & { content: string }>;
+  return res.json() as Promise<SkillSummary & { content: string; enabled: boolean }>;
+}
+
+export async function updateSkillEnabled(name: string, enabled: boolean) {
+  const res = await fetch(`${API}/skills/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    headers: authHeaders(),
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<SkillSummary>;
+}
+
+export async function uploadSkillZip(file: File, overwrite = false) {
+  const form = new FormData();
+  form.append("file", file);
+  if (overwrite) form.append("overwrite", "true");
+  const headers: Record<string, string> = {};
+  const token = getApiToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(`${API}/skills`, {
+    method: "POST",
+    headers,
+    body: form,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<SkillUploadResult>;
+}
+
+export async function deleteSkill(name: string) {
+  const res = await fetch(`${API}/skills/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
 }
 
 export async function listArtifacts(sessionId: string) {

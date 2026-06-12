@@ -9,6 +9,7 @@ pub mod react;
 pub mod run;
 pub mod session_meta;
 pub mod settings;
+pub mod skill;
 pub mod tool_policy;
 pub mod usage;
 
@@ -25,5 +26,6 @@ pub use react::{PlanRecord, ReactRepo, TodoRecord};
 pub use run::{RunRecord, RunRepo};
 pub use session_meta::{SessionMetaRecord, SessionMetaRepo};
 pub use settings::SettingsRepo;
+pub use skill::{SkillRecord, SkillRepo};
 pub use tool_policy::{seed_tool_policies, ToolPolicyRecord, ToolPolicyRepo};
 pub use usage::{UsageRepo, UsageSummaryItem};

@@ -5,6 +5,7 @@ use maco_core::{
     api_key_preview, has_stored_api_key, merge_api_key, redact_config_for_api, MacoError, MacoResult,
 };
 use maco_db::{ModelRecord, ModelRepo};
+use maco_harness::validate_provider;
 use serde::{Deserialize, Serialize};
 
 /// 对外模型视图（不含明文 api_key，仅 preview）。
@@ -14,7 +15,7 @@ pub struct ModelView {
     pub id: String,
     /// 显示名称。
     pub name: String,
-    /// 提供商：`openai` 或 `anthropic`。
+    /// 提供商：`openai` / `anthropic` / `gemini` / `openrouter`。
     pub provider: String,
     /// 上游模型标识（如 `gpt-4o`、`claude-sonnet-4-20250514`）。
     pub model_id: String,
@@ -43,7 +44,7 @@ pub struct ModelView {
 pub struct ModelUpsertBody {
     /// 显示名称。
     pub name: String,
-    /// 提供商：`openai` 或 `anthropic`。
+    /// 提供商：`openai` / `anthropic` / `gemini` / `openrouter`。
     pub provider: String,
     /// 上游模型标识。
     pub model_id: String,
@@ -106,9 +107,7 @@ pub async fn upsert_from_body(
     id: Option<&str>,
     body: ModelUpsertBody,
 ) -> MacoResult<ModelView> {
-    if !matches!(body.provider.as_str(), "openai" | "anthropic") {
-        return Err(MacoError::config("provider must be openai or anthropic"));
-    }
+    validate_provider(&body.provider)?;
     if body.name.trim().is_empty() || body.model_id.trim().is_empty() {
         return Err(MacoError::config("name and model_id are required"));
     }

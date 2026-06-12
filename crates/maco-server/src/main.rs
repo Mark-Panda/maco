@@ -7,6 +7,7 @@ mod models_api;
 mod openapi;
 mod routes;
 mod session_facade;
+mod skills_sync;
 mod state;
 mod worker;
 
@@ -22,7 +23,7 @@ use maco_db::{
     seed_default_filesystem_mcp, wal_checkpoint, wal_checkpoint_adk, McpServerRepo, ModelRecord,
     ModelRepo, SettingsRepo,
 };
-use tracing_subscriber::EnvFilter;
+use maco_telemetry::init_maco_tracing;
 
 use crate::auth::auth_middleware;
 use crate::openapi::ApiDoc;
@@ -52,9 +53,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> MacoResult<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("maco=info".parse().unwrap()))
-        .init();
+    let _telemetry = init_maco_tracing();
 
     let cli = Cli::parse();
     let cfg = load_config()?;

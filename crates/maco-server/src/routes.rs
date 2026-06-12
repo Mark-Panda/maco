@@ -13,13 +13,14 @@ use maco_harness::elicitation::{action_from_str, ElicitationRespondBody};
 use maco_governance::{
     generate_token, hash_token, pii_guardrail_enabled, scopes_json, SCOPE_ADMIN,
 };
-use maco_harness::SkillLoader;
+use maco_harness::{delete_skill, install_skill_zip};
 use serde::{Deserialize, Serialize};
 use tokio_stream::{wrappers::BroadcastStream, wrappers::ReceiverStream, StreamExt as _};
 
 use crate::auth::{require_admin, AuthContext};
 use crate::export::session_markdown;
 use crate::models_api::{list_views, upsert_from_body, ModelUpsertBody, ModelView};
+use crate::skills_sync::{self, skill_to_summary, SkillSummary, SkillUploadResponse};
 use crate::AppState;
 
 /// 挂载于 `/api` 下的全部 REST 与 SSE 端点。
@@ -78,9 +79,12 @@ pub fn api_router() -> Router<AppState> {
             "/tool-policies/{id}",
             patch(update_tool_policy).delete(delete_tool_policy),
         )
-        // Skill 扫描
-        .route("/skills", get(list_skills))
-        .route("/skills/{name}", get(get_skill))
+        // Skill 管理
+        .route("/skills", get(list_skills).post(upload_skill_zip))
+        .route(
+            "/skills/{name}",
+            get(get_skill).patch(patch_skill).delete(delete_skill_handler),
+        )
         // API Token 管理
         .route("/auth/tokens", get(list_tokens).post(create_token))
         .route("/auth/tokens/{id}", delete(revoke_token))
@@ -124,7 +128,8 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "db": "ok",
         "mcp": mcp,
         "memory": "ok",
-        "skills": SkillLoader::scan(None).len(),
+        "skills": state.adk_skills.enabled_count(),
+        "skills_total": state.adk_skills.total_count(),
         "bind": state.bind_addr,
     }))
 }
@@ -758,18 +763,116 @@ async fn export_session(
     Ok(resp)
 }
 
-/// `GET /skills` — 扫描本地 Skill 目录并返回摘要列表。
-async fn list_skills() -> Json<Vec<SkillSummary>> {
-    Json(
-        SkillLoader::scan(None)
-            .into_iter()
-            .map(|s| SkillSummary {
-                name: s.name,
-                description: s.description,
-                file_path: s.file_path.display().to_string(),
-            })
-            .collect(),
-    )
+/// `GET /skills` — 扫描本地 Skill 目录并返回摘要列表（含启用状态）。
+async fn list_skills(State(state): State<AppState>) -> Result<Json<Vec<SkillSummary>>, ApiError> {
+    Ok(Json(
+        skills_sync::sync_skills(&state.skills, state.adk_skills.as_ref(), None).await?,
+    ))
+}
+
+/// `POST /skills` — multipart 上传 Skill zip（字段 `file`，可选 `overwrite=true`）。
+async fn upload_skill_zip(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<SkillUploadResponse>, ApiError> {
+    let mut filename = "skill.zip".to_string();
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut overwrite = false;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| MacoError::config(e.to_string()))?
+    {
+        let name = field.name().unwrap_or_default();
+        match name {
+            "file" => {
+                filename = field
+                    .file_name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "skill.zip".into());
+                bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| MacoError::config(e.to_string()))?
+                    .to_vec();
+            }
+            "overwrite" => {
+                let v = field
+                    .text()
+                    .await
+                    .map_err(|e| MacoError::config(e.to_string()))?;
+                overwrite = matches!(v.trim(), "1" | "true" | "yes" | "on");
+            }
+            _ => {}
+        }
+    }
+
+    if bytes.is_empty() {
+        return Err(MacoError::config("file field is required").into());
+    }
+
+    let result = install_skill_zip(&bytes, &filename, overwrite)?;
+    state
+        .skills
+        .upsert_from_scan(
+            &result.skill.name,
+            &result.skill.description,
+            &result.skill.path.display().to_string(),
+        )
+        .await?;
+    state
+        .skills
+        .set_enabled(&result.skill.name, true)
+        .await?;
+    skills_sync::sync_skills(&state.skills, state.adk_skills.as_ref(), None).await?;
+    Ok(Json(SkillUploadResponse {
+        name: result.skill.name.clone(),
+        description: result.skill.description.clone(),
+        file_path: result.skill.path.display().to_string(),
+        extracted_files: result.extracted_files,
+        skill: skill_to_summary(&result.skill, true),
+    }))
+}
+
+/// `PATCH /skills/{name}` — 启用或禁用 Skill。
+#[derive(Deserialize)]
+struct PatchSkillBody {
+    enabled: bool,
+}
+
+async fn patch_skill(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<PatchSkillBody>,
+) -> Result<Json<SkillSummary>, ApiError> {
+    let _ = skills_sync::sync_skills(&state.skills, state.adk_skills.as_ref(), None).await?;
+    let skill = state
+        .adk_skills
+        .find_by_name(&name)
+        .ok_or_else(|| MacoError::not_found("skill"))?;
+    state
+        .skills
+        .upsert_from_scan(
+            &skill.name,
+            &skill.description,
+            &skill.path.display().to_string(),
+        )
+        .await?;
+    state.skills.set_enabled(&name, body.enabled).await?;
+    state.adk_skills.set_enabled(&name, body.enabled);
+    Ok(Json(skill_to_summary(&skill, body.enabled)))
+}
+
+/// `DELETE /skills/{name}` — 删除已安装的 Skill。
+async fn delete_skill_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    delete_skill(&name)?;
+    let _ = state.skills.delete_by_name(&name).await;
+    state.adk_skills.remove(&name);
+    Ok(Json(serde_json::json!({ "deleted": true, "name": name })))
 }
 
 /// Skill 详情（含 Markdown 正文）。
@@ -783,16 +886,26 @@ struct SkillDetail {
     file_path: String,
     /// SKILL.md 正文。
     content: String,
+    /// 是否启用。
+    enabled: bool,
 }
 
 /// `GET /skills/{name}` — 获取单个 Skill 的完整内容。
-async fn get_skill(Path(name): Path<String>) -> Result<Json<SkillDetail>, ApiError> {
-    let skill = SkillLoader::get(&name, None).ok_or_else(|| MacoError::not_found("skill"))?;
+async fn get_skill(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<SkillDetail>, ApiError> {
+    let _ = skills_sync::reload_disabled(&state.skills, state.adk_skills.as_ref()).await?;
+    let skill = state
+        .adk_skills
+        .find_by_name(&name)
+        .ok_or_else(|| MacoError::not_found("skill"))?;
     Ok(Json(SkillDetail {
-        name: skill.name,
-        description: skill.description,
-        file_path: skill.file_path.display().to_string(),
-        content: skill.content,
+        name: skill.name.clone(),
+        description: skill.description.clone(),
+        file_path: skill.path.display().to_string(),
+        content: skill.body.clone(),
+        enabled: state.adk_skills.is_enabled(&name),
     }))
 }
 
@@ -1267,17 +1380,6 @@ async fn reload_tool_policies(
     reload_harness_policies(&state).await?;
     let count = state.tool_policies.list_enabled().await?.len();
     Ok(Json(serde_json::json!({ "reloaded": true, "enabled_count": count })))
-}
-
-/// Skill 扫描结果摘要（`GET /skills` 响应项）。
-#[derive(Serialize)]
-struct SkillSummary {
-    /// Skill 名称（来自 frontmatter）。
-    name: String,
-    /// Skill 描述。
-    description: String,
-    /// SKILL.md 文件绝对路径。
-    file_path: String,
 }
 
 /// 将 `MacoError` 映射为 HTTP 状态码的包装类型。

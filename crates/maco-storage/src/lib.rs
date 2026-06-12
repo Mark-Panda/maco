@@ -12,7 +12,7 @@ use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::SqlitePool;
 use std::str::FromStr;
 
-pub use artifacts::ArtifactStore;
+pub use artifacts::{adk_artifacts_enabled, ArtifactStore};
 
 /// 封装 adk `SessionService` 与 `MemoryService` 的打开与共享句柄。
 pub struct AdkStorage {

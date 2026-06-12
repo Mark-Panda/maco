@@ -8,6 +8,8 @@ maco-core = { workspace = true }
 maco-db = { workspace = true }
 adk-rust = { workspace = true }
 adk-core = { workspace = true }
+adk-telemetry = { version = "=1.0.0", features = ["otlp"] }
+tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

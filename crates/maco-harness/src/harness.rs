@@ -4,7 +4,7 @@ use std::sync::Arc;
 use adk_core::identity::{SessionId, UserId};
 use adk_core::{Content, Event, Part, Tool};
 use adk_rust::prelude::*;
-use adk_tool::SimpleToolContext;
+use adk_tool::{LoadArtifactsTool, SimpleToolContext};
 use futures::StreamExt;
 use maco_core::{
     ensure_session_workspace, resolve_project_root, MacoError, MacoResult, PendingToolCall,
@@ -17,7 +17,7 @@ use maco_db::{
 use adk_agent::guardrails::{GuardrailSet, PiiRedactor};
 use maco_governance::{pii_guardrail_enabled, pricing_from_model, redact_sse_payload, redact_text};
 use maco_react::ReactTools;
-use maco_storage::{AdkStorage, ArtifactStore};
+use maco_storage::{adk_artifacts_enabled, AdkStorage, ArtifactStore};
 use maco_telemetry::MacoCallbackLogger;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -36,7 +36,13 @@ use crate::model_factory::build_llm;
 use crate::orchestrator::RunOrchestrator;
 use crate::run_stream::RunStreamRegistry;
 use crate::shell::MacoBashTool;
-use crate::skills::SkillLoader;
+use crate::adk_skills::AdkSkillManager;
+use crate::compaction::{compaction_enabled, runner_compaction_options};
+use crate::tool_concurrency::{runner_run_config, tool_concurrency_enabled};
+use crate::skill_coordinator::{
+    default_coordinator_config, extract_user_query, resolve_skill_context,
+    skill_restricts_tools, MacoToolRegistry,
+};
 use crate::usage::UsageContext;
 
 /// HITL 恢复结果：同 Run 内唤醒，或断线后新建 Run 并返回 SSE。
@@ -66,6 +72,7 @@ pub struct MacoHarness {
     tmp_dir: PathBuf,
     meta: SessionMetaRepo,
     artifacts: Arc<ArtifactStore>,
+    adk_skills: Arc<AdkSkillManager>,
 }
 
 impl MacoHarness {
@@ -82,6 +89,7 @@ impl MacoHarness {
         tmp_dir: PathBuf,
         meta: SessionMetaRepo,
         artifacts: Arc<ArtifactStore>,
+        adk_skills: Arc<AdkSkillManager>,
     ) -> Self {
         Self {
             storage,
@@ -98,7 +106,12 @@ impl MacoHarness {
             tmp_dir,
             meta,
             artifacts,
+            adk_skills,
         }
+    }
+
+    pub fn adk_skills(&self) -> &Arc<AdkSkillManager> {
+        &self.adk_skills
     }
 
     async fn session_project_root(&self, session_id: &str) -> MacoResult<Option<PathBuf>> {
@@ -207,13 +220,10 @@ impl MacoHarness {
                 "\nNo project root is bound — ask for the project path or use absolute paths the user provides.\n",
             );
         }
-        let skills = SkillLoader::scan(None);
-        if !skills.is_empty() {
-            instruction.push_str("\n\nAvailable skills:\n");
-            for skill in skills.iter().take(8) {
-                instruction.push_str(&format!("- {}: {}\n", skill.name, skill.description));
-            }
-        }
+        instruction.push_str(
+            "\nRelevant skills from `.skills/`, `.claude/skills/`, or `~/.maco/skills/` \
+             are resolved via ADK ContextCoordinator; `allowed-tools` in frontmatter bind only those tools.\n",
+        );
         instruction
     }
 
@@ -323,6 +333,29 @@ impl MacoHarness {
         };
         let scratch_dir = ensure_session_workspace(&self.tmp_dir, session_id)?;
         let project_root = self.session_project_root(session_id).await?;
+        if let Err(e) = self
+            .adk_skills
+            .reload_from_disk(project_root.as_deref())
+        {
+            tracing::warn!("reload adk skills: {e}");
+        }
+        let skill_index = self.adk_skills.agent_index();
+        let mcp_toolsets = self.mcp_pool.toolsets().await;
+        let react_tools = ReactTools::new(self.react.clone());
+        let bash_tool: Arc<dyn Tool> = Arc::new(MacoBashTool::new(
+            scratch_dir.clone(),
+            project_root.clone(),
+        ));
+        let tool_registry = Arc::new(
+            MacoToolRegistry::build(&react_tools, bash_tool.clone(), &mcp_toolsets).await?,
+        );
+        let user_query = extract_user_query(&content);
+        let skill_context = resolve_skill_context(
+            &skill_index,
+            tool_registry.clone(),
+            &user_query,
+            &default_coordinator_config(),
+        );
         let run_id = run.id.clone();
         let run_id_for_task = run_id.clone();
         let (tx, rx) = mpsc::channel(256);
@@ -339,7 +372,7 @@ impl MacoHarness {
             .await;
 
         let llm = build_llm(model)?;
-        let react_tools = ReactTools::new(self.react.clone());
+        let compaction_opts = compaction_enabled().then(|| runner_compaction_options(llm.clone()));
         let logger = MacoCallbackLogger::new(
             self.callback_logs.clone(),
             session_id.to_string(),
@@ -375,9 +408,15 @@ impl MacoHarness {
             orchestrator: self.orchestrator.clone(),
         });
 
+        let mut instruction = self.build_instruction(&scratch_dir, project_root.as_deref());
+        if let Some(ref skill_ctx) = skill_context {
+            instruction.push_str("\n\n## Active Skill\n\n");
+            instruction.push_str(&skill_ctx.system_instruction);
+        }
+
         let mut builder = LlmAgentBuilder::new("maco")
             .description("maco personal agent")
-            .instruction(self.build_instruction(&scratch_dir, project_root.as_deref()))
+            .instruction(instruction)
             .model(llm)
             .input_guardrails(agent_guardrails())
             .output_guardrails(agent_guardrails())
@@ -391,27 +430,61 @@ impl MacoHarness {
                 artifact_capture,
             ));
 
-        for tool in react_tools.as_tool_arcs() {
-            builder = builder.tool(tool);
+        if skill_context
+            .as_ref()
+            .is_some_and(skill_restricts_tools)
+        {
+            if let Some(ref skill_ctx) = skill_context {
+                for tool in &skill_ctx.active_tools {
+                    builder = builder.tool(tool.clone());
+                }
+            }
+        } else {
+            for tool in react_tools.as_tool_arcs() {
+                builder = builder.tool(tool);
+            }
+            builder = builder.tool(bash_tool);
+            for ts in mcp_toolsets {
+                builder = builder.toolset(ts);
+            }
         }
-        builder = builder.tool(Arc::new(MacoBashTool::new(
-            scratch_dir.clone(),
-            project_root.clone(),
-        )));
-        for ts in self.mcp_pool.toolsets().await {
-            builder = builder.toolset(ts);
+
+        if adk_artifacts_enabled() {
+            builder = builder.tool(Arc::new(LoadArtifactsTool::new()));
         }
 
         let agent = builder
             .build()
             .map_err(|e| MacoError::Adk(e.to_string()))?;
 
+        let mut runner_builder = Runner::builder()
+            .app_name(APP_NAME)
+            .agent(Arc::new(agent))
+            .session_service(self.storage.session_service())
+            .memory_service(self.storage.memory_service());
+
+        if let Some(compaction) = compaction_opts {
+            runner_builder = runner_builder
+                .compaction_config(compaction.events)
+                .intra_compaction_config(compaction.intra)
+                .intra_compaction_summarizer(compaction.intra_summarizer)
+                .context_compaction(compaction.overflow);
+            tracing::debug!("runner context compaction enabled");
+        }
+
+        if tool_concurrency_enabled() {
+            runner_builder = runner_builder.run_config(runner_run_config());
+            tracing::debug!("runner tool concurrency enabled");
+        }
+
+        if adk_artifacts_enabled() {
+            runner_builder =
+                runner_builder.artifact_service(self.artifacts.adk_service());
+            tracing::debug!("runner ADK artifact service enabled");
+        }
+
         let runner = Arc::new(
-            Runner::builder()
-                .app_name(APP_NAME)
-                .agent(Arc::new(agent))
-                .session_service(self.storage.session_service())
-                .memory_service(self.storage.memory_service())
+            runner_builder
                 .build()
                 .map_err(|e| MacoError::Adk(e.to_string()))?,
         );
