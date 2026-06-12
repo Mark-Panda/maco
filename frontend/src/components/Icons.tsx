@@ -11,6 +11,7 @@ export type MacoIconName =
   | "mcp"
   | "toolPolicies"
   | "settings"
+  | "gitBranch"
   | "paperclip"
   | "x"
   | "panel-left"
@@ -137,6 +138,16 @@ export function MacoIcon({ name, size = 20, className }: MacoIconProps) {
           <path d="M10 7h10" />
           <path d="M8 12h8" />
           <path d="M14 17h6" />
+        </svg>
+      );
+    case "gitBranch":
+      return (
+        <svg {...p}>
+          <circle cx="6" cy="6" r="2.25" />
+          <circle cx="18" cy="12" r="2.25" />
+          <circle cx="6" cy="18" r="2.25" />
+          <path d="M6 8.25v7.5" />
+          <path d="M8.25 6h5.5a4 4 0 0 1 4 4v0" />
         </svg>
       );
     case "paperclip":

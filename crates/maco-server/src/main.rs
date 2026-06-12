@@ -7,6 +7,7 @@ mod models_api;
 mod openapi;
 mod routes;
 mod session_facade;
+mod session_meta_view;
 mod skills_sync;
 mod state;
 mod worker;

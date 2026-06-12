@@ -135,8 +135,11 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// `GET /sessions` — 列出所有会话元数据（与 adk session 对齐）。
-async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<maco_db::SessionMetaRecord>>, ApiError> {
-    Ok(Json(state.facade.list_sessions().await?))
+async fn list_sessions(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::session_meta_view::SessionMetaView>>, ApiError> {
+    let rows = state.facade.list_sessions().await?;
+    Ok(Json(crate::session_meta_view::enrich_sessions(rows)))
 }
 
 /// `POST /sessions` 请求体。
@@ -150,13 +153,17 @@ struct CreateSessionBody {
     project_root: Option<String>,
     /// Agent 权限模式，默认 `request_approval`。
     permission_mode: Option<String>,
+    /// 是否强制 Git worktree，默认 `true`。
+    git_worktree_enabled: Option<bool>,
+    /// worktree 分支前缀，默认 `maco/agent`。
+    git_branch_prefix: Option<String>,
 }
 
 /// `POST /sessions` — 创建新会话。
 async fn create_session(
     State(state): State<AppState>,
     Json(body): Json<CreateSessionBody>,
-) -> Result<Json<maco_db::SessionMetaRecord>, ApiError> {
+) -> Result<Json<crate::session_meta_view::SessionMetaView>, ApiError> {
     let permission_mode = body
         .permission_mode
         .as_deref()
@@ -168,6 +175,8 @@ async fn create_session(
             body.model_id,
             body.project_root,
             permission_mode,
+            body.git_worktree_enabled,
+            body.git_branch_prefix,
         )
         .await?;
     if rec.project_root.is_some() {
@@ -175,7 +184,7 @@ async fn create_session(
             tracing::warn!("sync filesystem mcp after create session: {e}");
         }
     }
-    Ok(Json(rec))
+    Ok(Json(crate::session_meta_view::SessionMetaView::from_record(rec)))
 }
 
 /// `PATCH /sessions/{id}` 请求体。
@@ -189,6 +198,10 @@ struct UpdateSessionBody {
     project_root: Option<String>,
     /// Agent 权限模式。
     permission_mode: Option<String>,
+    /// 是否强制 Git worktree。
+    git_worktree_enabled: Option<bool>,
+    /// worktree 分支前缀。
+    git_branch_prefix: Option<String>,
 }
 
 /// `GET /sessions/{id}/messages` — 加载会话历史消息（供前端恢复对话）。
@@ -230,6 +243,25 @@ async fn update_session(
             .facade
             .set_permission_mode(&id, maco_core::AgentPermissionMode::parse(mode))
             .await?;
+    }
+    if body.git_worktree_enabled.is_some() || body.git_branch_prefix.is_some() {
+        let rec = state
+            .meta
+            .get(&id)
+            .await?
+            .ok_or_else(|| ApiError::from(MacoError::not_found("session not found")))?;
+        let enabled = body.git_worktree_enabled.unwrap_or(rec.git_worktree_enabled != 0);
+        let prefix = body
+            .git_branch_prefix
+            .as_deref()
+            .unwrap_or(rec.git_branch_prefix.as_str());
+        state
+            .facade
+            .set_git_worktree_settings(&id, enabled, prefix)
+            .await?;
+        if let Err(e) = state.sync_filesystem_mcp().await {
+            tracing::warn!("sync filesystem mcp after git worktree settings: {e}");
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }

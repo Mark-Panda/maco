@@ -1386,6 +1386,114 @@ body.tasks-dock-resizing .tasks-dock-resizer {
   color: var(--text-muted);
 }
 
+.toolbar-bottom {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.git-worktree-toolbar {
+  position: relative;
+  width: 100%;
+}
+
+.git-worktree-toolbar-trigger--on .toolbar-tab-icon {
+  color: var(--accent);
+}
+
+.git-worktree-toolbar-panel {
+  position: fixed;
+  left: 80px;
+  bottom: 16px;
+  z-index: 50;
+  width: min(320px, calc(100vw - 96px));
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+
+.git-worktree-toolbar-title {
+  margin: 0 0 6px;
+  font-size: 0.9rem;
+  color: var(--text-h);
+}
+
+.git-worktree-toolbar-desc {
+  margin: 0 0 12px;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.git-worktree-toolbar-alert {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.git-worktree-toolbar-alert--info {
+  color: var(--text-muted);
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+}
+
+.git-worktree-toolbar-alert--warn {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+:root[data-theme="dark"] .git-worktree-toolbar-alert--warn {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.15);
+}
+
+.git-worktree-toolbar-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 0.82rem;
+  color: var(--text-h);
+  cursor: pointer;
+}
+
+.git-worktree-toolbar-toggle input {
+  accent-color: var(--accent);
+}
+
+.git-worktree-toolbar-prefix {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.git-worktree-toolbar-prefix input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-h);
+  font-size: 0.82rem;
+}
+
+.git-worktree-toolbar-meta {
+  margin: 10px 0 0;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-permission-selector {
   position: relative;
   flex-shrink: 0;

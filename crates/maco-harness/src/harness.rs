@@ -7,12 +7,13 @@ use adk_rust::prelude::*;
 use adk_tool::{LoadArtifactsTool, SimpleToolContext};
 use futures::StreamExt;
 use maco_core::{
-    ensure_session_workspace, resolve_project_root, AgentPermissionMode, MacoError, MacoResult,
-    PendingToolCall, ResumeContext, SseEnvelope, RUN_STATUS_AWAITING_USER, APP_NAME, USER_ID,
+    branch_name, ensure_session_workspace, resolve_session_workspace, workspace_from_cached,
+    AgentPermissionMode, MacoError, MacoResult, PendingToolCall, ResumeContext, SessionWorkspace,
+    SseEnvelope, RUN_STATUS_AWAITING_USER, APP_NAME, USER_ID,
 };
 use maco_db::{
-    CallbackLogRepo, ElicitationRepo, ModelRecord, ReactRepo, SessionMetaRepo, ToolPolicyRecord,
-    UsageRepo,
+    rebuild_filesystem_mcp_roots, CallbackLogRepo, ElicitationRepo, McpServerRepo, ModelRecord,
+    ReactRepo, SessionMetaRepo, ToolPolicyRecord, UsageRepo,
 };
 use adk_agent::guardrails::{GuardrailSet, PiiRedactor};
 use maco_governance::{pii_guardrail_enabled, pricing_from_model, redact_sse_payload, redact_text};
@@ -68,6 +69,7 @@ pub struct MacoHarness {
     hitl_broker: HitlBroker,
     tool_policies: Arc<RwLock<Vec<ToolPolicyRecord>>>,
     mcp_pool: Arc<McpPool>,
+    mcp_servers: McpServerRepo,
     run_streams: RunStreamRegistry,
     tmp_dir: PathBuf,
     meta: SessionMetaRepo,
@@ -85,6 +87,7 @@ impl MacoHarness {
         elicitation: ElicitationRepo,
         tool_policies: Vec<ToolPolicyRecord>,
         mcp_pool: Arc<McpPool>,
+        mcp_servers: McpServerRepo,
         run_streams: RunStreamRegistry,
         tmp_dir: PathBuf,
         meta: SessionMetaRepo,
@@ -102,6 +105,7 @@ impl MacoHarness {
             hitl_broker: HitlBroker::new(),
             tool_policies: Arc::new(RwLock::new(tool_policies)),
             mcp_pool,
+            mcp_servers,
             run_streams,
             tmp_dir,
             meta,
@@ -110,13 +114,77 @@ impl MacoHarness {
         }
     }
 
+    async fn sync_filesystem_mcp(&self) -> MacoResult<()> {
+        if rebuild_filesystem_mcp_roots(&self.mcp_servers, &self.meta, &self.tmp_dir).await? {
+            self.mcp_pool.reload().await?;
+        }
+        Ok(())
+    }
+
     pub fn adk_skills(&self) -> &Arc<AdkSkillManager> {
         &self.adk_skills
     }
 
-    async fn session_project_root(&self, session_id: &str) -> MacoResult<Option<PathBuf>> {
+    async fn session_workspace(&self, session_id: &str) -> MacoResult<Option<SessionWorkspace>> {
         let meta = self.meta.get(session_id).await?;
-        resolve_project_root(meta.as_ref().and_then(|m| m.project_root.as_deref()))
+        let Some(rec) = meta else {
+            return Ok(None);
+        };
+        let worktree_enabled = rec.git_worktree_enabled != 0;
+        let cached_ok = if worktree_enabled && rec.project_root.is_some() {
+            let path_valid = rec
+                .git_worktree_path
+                .as_deref()
+                .filter(|p| !p.trim().is_empty())
+                .map(std::path::Path::new)
+                .is_some_and(|p| p.exists());
+            let expected_branch = branch_name(&rec.git_branch_prefix, session_id);
+            let branch_ok = rec.git_worktree_branch.as_deref() == Some(expected_branch.as_str());
+            path_valid && branch_ok
+        } else {
+            !worktree_enabled
+        };
+        if cached_ok {
+            if let Some(ws) = workspace_from_cached(
+                rec.project_root.as_deref(),
+                worktree_enabled,
+                rec.git_worktree_path.as_deref(),
+                rec.git_worktree_branch.as_deref(),
+            )? {
+                if !worktree_enabled || ws.uses_worktree {
+                    return Ok(Some(ws));
+                }
+            }
+        }
+        let ws = resolve_session_workspace(
+            rec.project_root.as_deref(),
+            session_id,
+            rec.git_worktree_enabled != 0,
+            &rec.git_branch_prefix,
+        )?;
+        let mut mcp_dirty = false;
+        if let Some(ref workspace) = ws {
+            if workspace.uses_worktree {
+                let branch = workspace.worktree_branch.as_deref().unwrap_or("");
+                self.meta
+                    .update_worktree_state(
+                        session_id,
+                        &workspace.workspace_root.to_string_lossy(),
+                        branch,
+                    )
+                    .await?;
+                mcp_dirty = true;
+            } else {
+                self.meta.clear_worktree_state(session_id).await?;
+                mcp_dirty = rec.git_worktree_path.is_some();
+            }
+        }
+        if mcp_dirty {
+            if let Err(e) = self.sync_filesystem_mcp().await {
+                tracing::warn!("sync filesystem mcp after worktree provision: {e}");
+            }
+        }
+        Ok(ws)
     }
 
     async fn session_permission_mode(&self, session_id: &str) -> AgentPermissionMode {
@@ -201,7 +269,7 @@ impl MacoHarness {
     fn build_instruction(
         &self,
         scratch_dir: &std::path::Path,
-        project_root: Option<&std::path::Path>,
+        workspace: Option<&SessionWorkspace>,
     ) -> String {
         let scratch = scratch_dir.display();
         let mut instruction = format!(
@@ -217,14 +285,30 @@ impl MacoHarness {
              Scratch directory (temp downloads, intermediates, throwaway scripts only): `{scratch}`\n\
              - Put temporary/scratch artifacts here — not user project source files.\n",
         );
-        if let Some(root) = project_root {
-            instruction.push_str(&format!(
-                "\nProject root (bound for this session): `{path}`\n\
-                 - When editing the user's codebase, use paths under this directory.\n\
-                 - bash starts in this directory; relative paths resolve here.\n\
-                 - Add this path to MCP filesystem allowed roots if file tools cannot access it.\n",
-                path = root.display(),
-            ));
+        if let Some(ws) = workspace {
+            if ws.uses_worktree {
+                let branch = ws
+                    .worktree_branch
+                    .as_deref()
+                    .unwrap_or("(unknown)");
+                instruction.push_str(&format!(
+                    "\nGit worktree workspace (MUST edit here): `{wt}`\n\
+                     Worktree branch: `{branch}`\n\
+                     Repository root (do NOT edit directly): `{repo}`\n\
+                     - All code changes MUST stay inside the worktree workspace directory.\n\
+                     - bash starts in the worktree; relative paths resolve there.\n\
+                     - Never modify files in the main repository checkout.\n",
+                    wt = ws.workspace_root.display(),
+                    repo = ws.repo_root.display(),
+                ));
+            } else {
+                instruction.push_str(&format!(
+                    "\nProject root (bound for this session): `{path}`\n\
+                     - When editing the user's codebase, use paths under this directory.\n\
+                     - bash starts in this directory; relative paths resolve here.\n",
+                    path = ws.workspace_root.display(),
+                ));
+            }
         } else {
             instruction.push_str(
                 "\nNo project root is bound — ask for the project path or use absolute paths the user provides.\n",
@@ -309,9 +393,9 @@ impl MacoHarness {
         pending: &PendingToolCall,
     ) -> MacoResult<serde_json::Value> {
         let scratch_dir = ensure_session_workspace(&self.tmp_dir, session_id)?;
-        let project_root = self.session_project_root(session_id).await?;
+        let workspace = self.session_workspace(session_id).await?;
         if pending.name == "bash" {
-            let tool = MacoBashTool::new(scratch_dir, project_root);
+            let tool = MacoBashTool::new(scratch_dir, workspace);
             return tool
                 .execute(
                     Arc::new(SimpleToolContext::new(&pending.call_id)),
@@ -342,11 +426,9 @@ impl MacoHarness {
             self.orchestrator.start_run(session_id).await?
         };
         let scratch_dir = ensure_session_workspace(&self.tmp_dir, session_id)?;
-        let project_root = self.session_project_root(session_id).await?;
-        if let Err(e) = self
-            .adk_skills
-            .reload_from_disk(project_root.as_deref())
-        {
+        let workspace = self.session_workspace(session_id).await?;
+        let skill_root = workspace.as_ref().map(|ws| ws.repo_root.as_path());
+        if let Err(e) = self.adk_skills.reload_from_disk(skill_root) {
             tracing::warn!("reload adk skills: {e}");
         }
         let skill_index = self.adk_skills.agent_index();
@@ -354,7 +436,7 @@ impl MacoHarness {
         let react_tools = ReactTools::new(self.react.clone());
         let bash_tool: Arc<dyn Tool> = Arc::new(MacoBashTool::new(
             scratch_dir.clone(),
-            project_root.clone(),
+            workspace.clone(),
         ));
         let tool_registry = Arc::new(
             MacoToolRegistry::build(&react_tools, bash_tool.clone(), &mcp_toolsets).await?,
@@ -408,19 +490,22 @@ impl MacoHarness {
             model_name: model.name.clone(),
             pricing: pricing_from_model(model),
         });
+        let workspace_root = workspace
+            .as_ref()
+            .map(|ws| ws.workspace_root.clone());
         let artifact_capture = Arc::new(ArtifactCaptureState {
             session_id: session_id.to_string(),
             run_id: run_id.clone(),
             artifacts: Arc::clone(&self.artifacts),
             scratch_dir: scratch_dir.clone(),
-            project_root: project_root.clone(),
+            project_root: workspace_root,
             scratch_known: Arc::new(Mutex::new(snapshot_scratch_files(&scratch_dir))),
             sse_tx: tx.clone(),
             streams: streams.clone(),
             orchestrator: self.orchestrator.clone(),
         });
 
-        let mut instruction = self.build_instruction(&scratch_dir, project_root.as_deref());
+        let mut instruction = self.build_instruction(&scratch_dir, workspace.as_ref());
         if let Some(ref skill_ctx) = skill_context {
             instruction.push_str("\n\n## Active Skill\n\n");
             instruction.push_str(&skill_ctx.system_instruction);

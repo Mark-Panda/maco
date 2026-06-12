@@ -186,6 +186,8 @@ pub fn ensure_data_dirs(paths: &DataPaths) -> MacoResult<()> {
         .map_err(|e| MacoError::config(format!("create tmp sessions dir: {e}")))?;
     std::fs::create_dir_all(default_skills_dir())
         .map_err(|e| MacoError::config(format!("create skills dir: {e}")))?;
+    std::fs::create_dir_all(crate::maco_home_dir().join("worktrees"))
+        .map_err(|e| MacoError::config(format!("create worktrees dir: {e}")))?;
     Ok(())
 }
 

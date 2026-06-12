@@ -3,6 +3,8 @@ const TOKEN_KEY = "maco_api_token";
 const LAST_SESSION_KEY = "maco_last_session";
 const LAST_MODEL_KEY = "maco_last_model";
 const LAST_PERMISSION_MODE_KEY = "maco_last_permission_mode";
+const GIT_WORKTREE_ENABLED_KEY = "maco_git_worktree_enabled";
+const GIT_BRANCH_PREFIX_KEY = "maco_git_branch_prefix";
 const SIDEBAR_VISIBLE_KEY = "maco_sidebar_visible";
 const SIDEBAR_WIDTH_KEY = "maco_sidebar_width";
 
@@ -77,6 +79,54 @@ export type AgentPermissionMode =
   | "auto_approve"
   | "full_access";
 
+export const DEFAULT_GIT_BRANCH_PREFIX = "maco/agent";
+
+export type GitWorktreeStatus =
+  | "disabled"
+  | "no_project"
+  | "not_git_repo"
+  | "git_unavailable"
+  | "pending"
+  | "active";
+
+/** 根据全局开关与会话元数据推导 worktree 状态（无服务端字段时做前端兜底）。 */
+export function deriveWorktreeStatus(
+  enabled: boolean,
+  projectRoot: string | null | undefined,
+  worktreePath: string | null | undefined,
+  serverStatus?: string | null,
+): GitWorktreeStatus {
+  if (
+    serverStatus === "disabled" ||
+    serverStatus === "no_project" ||
+    serverStatus === "not_git_repo" ||
+    serverStatus === "git_unavailable" ||
+    serverStatus === "pending" ||
+    serverStatus === "active"
+  ) {
+    return serverStatus;
+  }
+  if (!enabled) return "disabled";
+  if (!projectRoot?.trim()) return "no_project";
+  if (worktreePath?.trim()) return "active";
+  return "pending";
+}
+
+/** 将后端 git / worktree 错误转为更易读的提示。 */
+export function friendlyWorktreeError(raw: string): string {
+  const msg = raw.toLowerCase();
+  if (
+    (msg.includes("not found") || msg.includes("enoent")) &&
+    msg.includes("git")
+  ) {
+    return "未检测到 git 命令，请安装 Git 并确保其在 PATH 中。";
+  }
+  if (msg.includes("git worktree") || msg.includes("git rev-parse")) {
+    return `Git worktree 操作失败：${raw}`;
+  }
+  return raw;
+}
+
 export function getLastPermissionMode(): AgentPermissionMode {
   const raw = localStorage.getItem(LAST_PERMISSION_MODE_KEY);
   if (raw === "auto_approve" || raw === "full_access" || raw === "request_approval") {
@@ -87,6 +137,28 @@ export function getLastPermissionMode(): AgentPermissionMode {
 
 export function setLastPermissionMode(mode: AgentPermissionMode) {
   localStorage.setItem(LAST_PERMISSION_MODE_KEY, mode);
+}
+
+export function getLastGitWorktreeEnabled(): boolean {
+  const raw = localStorage.getItem(GIT_WORKTREE_ENABLED_KEY);
+  if (raw === "0") return false;
+  if (raw === "1") return true;
+  return true;
+}
+
+export function setLastGitWorktreeEnabled(enabled: boolean) {
+  localStorage.setItem(GIT_WORKTREE_ENABLED_KEY, enabled ? "1" : "0");
+}
+
+export function getLastGitBranchPrefix(): string {
+  const raw = localStorage.getItem(GIT_BRANCH_PREFIX_KEY);
+  if (raw && raw.trim()) return raw.trim();
+  return DEFAULT_GIT_BRANCH_PREFIX;
+}
+
+export function setLastGitBranchPrefix(prefix: string) {
+  const trimmed = prefix.trim() || DEFAULT_GIT_BRANCH_PREFIX;
+  localStorage.setItem(GIT_BRANCH_PREFIX_KEY, trimmed);
 }
 
 export type ModelView = {
@@ -190,6 +262,8 @@ export async function createSession(
   modelId?: string,
   projectRoot?: string,
   permissionMode?: AgentPermissionMode,
+  gitWorktreeEnabled?: boolean,
+  gitBranchPrefix?: string,
 ) {
   const res = await fetch(`${API}/sessions`, {
     method: "POST",
@@ -199,10 +273,12 @@ export async function createSession(
       model_id: modelId,
       project_root: projectRoot?.trim() || undefined,
       permission_mode: permissionMode ?? "request_approval",
+      git_worktree_enabled: gitWorktreeEnabled ?? true,
+      git_branch_prefix: gitBranchPrefix?.trim() || DEFAULT_GIT_BRANCH_PREFIX,
     }),
   });
   if (!res.ok) throw new Error(await res.text());
-  return res.json() as Promise<{ session_id: string }>;
+  return res.json() as Promise<SessionMeta>;
 }
 
 async function consumeSse(
@@ -420,6 +496,11 @@ export type SessionMeta = {
   model_id: string | null;
   project_root: string | null;
   permission_mode: AgentPermissionMode;
+  git_worktree_enabled: number;
+  git_branch_prefix: string;
+  git_worktree_path: string | null;
+  git_worktree_branch: string | null;
+  git_worktree_status?: GitWorktreeStatus;
   status: string;
   created_at: string;
   updated_at: string;
@@ -618,6 +699,8 @@ export async function updateSession(
     model_id?: string;
     project_root?: string;
     permission_mode?: AgentPermissionMode;
+    git_worktree_enabled?: boolean;
+    git_branch_prefix?: string;
   },
 ) {
   const res = await fetch(`${API}/sessions/${sessionId}`, {

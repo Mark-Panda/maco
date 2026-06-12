@@ -1,4 +1,4 @@
-//! 会话级 shell 工具：临时目录指向 `~/.maco/tmp`，工作目录不锁定（可 `cd` 到用户项目）。
+//! 会话级 shell 工具：临时目录指向 `~/.maco/tmp`，工作目录指向会话工作区（含 Git worktree）。
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -6,20 +6,21 @@ use std::sync::Arc;
 
 use adk_core::{AdkError, Result, Tool, ToolContext};
 use async_trait::async_trait;
+use maco_core::{bash_command_targets_main_repo, SessionWorkspace};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// 执行 shell 命令；`TMPDIR` 等指向会话临时目录，但不限制 `cd` / 绝对路径。
+/// 执行 shell 命令；工作目录为会话工作区（worktree 或项目根）。
 pub struct MacoBashTool {
     scratch_dir: PathBuf,
-    project_root: Option<PathBuf>,
+    workspace: Option<SessionWorkspace>,
 }
 
 impl MacoBashTool {
-    pub fn new(scratch_dir: PathBuf, project_root: Option<PathBuf>) -> Self {
+    pub fn new(scratch_dir: PathBuf, workspace: Option<SessionWorkspace>) -> Self {
         Self {
             scratch_dir,
-            project_root,
+            workspace,
         }
     }
 }
@@ -36,8 +37,8 @@ impl Tool for MacoBashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command. TMPDIR points to the session scratch dir (~/.maco/tmp/sessions/<id>); \
-         use absolute paths or cd when editing a user project."
+        "Execute a shell command. TMPDIR points to the session scratch dir; cwd is the session \
+         workspace (Git worktree when enabled). Use relative paths from the workspace root."
     }
 
     fn parameters_schema(&self) -> Option<Value> {
@@ -53,6 +54,17 @@ impl Tool for MacoBashTool {
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         let args: BashArgs = serde_json::from_value(args)
             .map_err(|e| AdkError::tool(format!("invalid bash arguments: {e}")))?;
+        if let Some(ref ws) = self.workspace {
+            if ws.uses_worktree {
+                if let Some(reason) =
+                    bash_command_targets_main_repo(&args.command, &ws.repo_root, &ws.workspace_root)
+                {
+                    return Err(AdkError::tool(format!(
+                        "command blocked ({reason}); edit files in the worktree workspace only"
+                    )));
+                }
+            }
+        }
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-lc")
             .arg(&args.command)
@@ -61,8 +73,17 @@ impl Tool for MacoBashTool {
             .env("TEMP", &self.scratch_dir)
             .env("TMP", &self.scratch_dir)
             .env("MACO_SCRATCH_DIR", &self.scratch_dir);
-        if let Some(ref root) = self.project_root {
-            cmd.current_dir(root).env("MACO_PROJECT_ROOT", root);
+        if let Some(ref ws) = self.workspace {
+            cmd.current_dir(&ws.workspace_root)
+                .env("MACO_WORKSPACE_ROOT", &ws.workspace_root)
+                .env("MACO_PROJECT_ROOT", &ws.repo_root)
+                .env("MACO_GIT_REPO_ROOT", &ws.repo_root);
+            if ws.uses_worktree {
+                cmd.env("MACO_GIT_WORKTREE", "1");
+                if let Some(ref branch) = ws.worktree_branch {
+                    cmd.env("MACO_GIT_BRANCH", branch);
+                }
+            }
         }
         let output = cmd
             .output()
@@ -72,13 +93,19 @@ impl Tool for MacoBashTool {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        let project = self
-            .project_root
+        let (workspace, repo, branch) = self
+            .workspace
             .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(none)".into());
+            .map(|ws| {
+                (
+                    ws.workspace_root.display().to_string(),
+                    ws.repo_root.display().to_string(),
+                    ws.worktree_branch.clone().unwrap_or_else(|| "-".into()),
+                )
+            })
+            .unwrap_or_else(|| ("(none)".into(), "(none)".into(), "-".into()));
         Ok(Value::String(format!(
-            "project_root: {project}\nscratch_dir: {}\n{stdout}{stderr}\nexit_code: {exit_code}\n",
+            "workspace_root: {workspace}\nrepo_root: {repo}\nworktree_branch: {branch}\nscratch_dir: {}\n{stdout}{stderr}\nexit_code: {exit_code}\n",
             self.scratch_dir.display()
         )))
     }

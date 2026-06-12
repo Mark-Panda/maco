@@ -28,6 +28,16 @@ pub struct SessionMetaDoc {
     pub project_root: Option<String>,
     /// Agent 权限模式（`request_approval` / `auto_approve` / `full_access`）。
     pub permission_mode: String,
+    /// 是否强制 Git worktree。
+    pub git_worktree_enabled: i64,
+    /// worktree 分支前缀。
+    pub git_branch_prefix: String,
+    /// worktree 检出路径。
+    pub git_worktree_path: Option<String>,
+    /// worktree 分支名。
+    pub git_worktree_branch: Option<String>,
+    /// worktree 状态（`disabled` / `no_project` / `not_git_repo` / `git_unavailable` / `pending` / `active`）。
+    pub git_worktree_status: String,
     /// 生命周期状态（`active` / `deleted` 等）。
     pub status: String,
 }
@@ -43,6 +53,10 @@ pub struct CreateSessionDoc {
     pub project_root: Option<String>,
     /// Agent 权限模式，默认 `request_approval`。
     pub permission_mode: Option<String>,
+    /// 是否强制 Git worktree，默认 `true`。
+    pub git_worktree_enabled: Option<bool>,
+    /// worktree 分支前缀，默认 `maco/agent`。
+    pub git_branch_prefix: Option<String>,
 }
 
 /// `POST /chat` 请求体。

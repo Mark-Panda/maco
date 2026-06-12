@@ -9,8 +9,9 @@ use chrono::Utc;
 use maco_storage::memory_admin;
 use adk_session::{CreateRequest, DeleteRequest, GetRequest, ListRequest};
 use maco_core::{
-    resolve_project_root, AgentPermissionMode, ChatMessage, MacoError, MacoResult, MemoryListItem,
-    MemoryListResponse, MemorySearchResponse, SessionMessagesResponse, APP_NAME, USER_ID,
+    remove_worktree, resolve_project_root, resolve_session_workspace, AgentPermissionMode,
+    ChatMessage, MacoError, MacoResult, MemoryListItem, MemoryListResponse, MemorySearchResponse,
+    SessionMessagesResponse, APP_NAME, USER_ID,
 };
 use maco_db::{ModelRecord, ModelRepo, SessionMetaRecord, SessionMetaRepo};
 use maco_storage::AdkStorage;
@@ -35,6 +36,8 @@ impl SessionFacade {
         model_id: Option<String>,
         project_root: Option<String>,
         permission_mode: Option<AgentPermissionMode>,
+        git_worktree_enabled: Option<bool>,
+        git_branch_prefix: Option<String>,
     ) -> MacoResult<SessionMetaRecord> {
         let project_root = resolve_project_root(project_root.as_deref())?
             .map(|p| p.to_string_lossy().into_owned());
@@ -60,6 +63,8 @@ impl SessionFacade {
             model_id,
             project_root,
             permission_mode,
+            git_worktree_enabled,
+            git_branch_prefix,
         );
         if let Err(e) = self.meta.insert(&rec).await {
             let _ = self
@@ -73,7 +78,26 @@ impl SessionFacade {
                 .await;
             return Err(e);
         }
-        Ok(rec)
+        if let Err(e) = self.provision_worktree(&session_id).await {
+            if let Ok(Some(rec)) = self.meta.get(&session_id).await {
+                Self::cleanup_worktree(&rec, &session_id);
+            }
+            let _ = self.meta.delete_hard(&session_id).await;
+            let _ = self
+                .adk
+                .session
+                .delete(DeleteRequest {
+                    app_name: APP_NAME.into(),
+                    user_id: USER_ID.into(),
+                    session_id,
+                })
+                .await;
+            return Err(e);
+        }
+        self.meta
+            .get(&session_id)
+            .await?
+            .ok_or_else(|| MacoError::database("session missing after create"))
     }
 
     /// 列出会话：与 adk 对齐，并为缺失元数据的 session 自动补建记录。
@@ -95,7 +119,7 @@ impl SessionFacade {
         for s in adk_sessions {
             let sid = s.id().to_string();
             if !known.contains(&sid) {
-                let rec = SessionMetaRepo::new_record(sid.clone(), None, None, None, None);
+                let rec = SessionMetaRepo::new_record(sid.clone(), None, None, None, None, None, None);
                 let _ = self.meta.insert(&rec).await;
                 metas.push(rec);
             }
@@ -106,6 +130,9 @@ impl SessionFacade {
 
     /// 软删 → 清理 memory 引用 → 删除 adk session → 标记 deleted。
     pub async fn delete_session(&self, session_id: &str) -> MacoResult<()> {
+        if let Some(rec) = self.meta.get(session_id).await? {
+            Self::cleanup_worktree(&rec, session_id);
+        }
         self.meta.update_status(session_id, "pending_delete").await?;
         self.adk
             .memory
@@ -140,11 +167,82 @@ impl SessionFacade {
         session_id: &str,
         project_root: Option<&str>,
     ) -> MacoResult<()> {
+        if let Some(rec) = self.meta.get(session_id).await? {
+            Self::cleanup_worktree(&rec, session_id);
+        }
         let normalized = resolve_project_root(project_root)?
             .map(|p| p.to_string_lossy().into_owned());
         self.meta
             .update_project_root(session_id, normalized.as_deref())
-            .await
+            .await?;
+        self.provision_worktree(session_id).await
+    }
+
+    /// 更新 Git worktree 策略并重新 provision。
+    pub async fn set_git_worktree_settings(
+        &self,
+        session_id: &str,
+        enabled: bool,
+        branch_prefix: &str,
+    ) -> MacoResult<()> {
+        self.meta
+            .update_git_worktree_settings(session_id, enabled, branch_prefix)
+            .await?;
+        self.provision_worktree(session_id).await
+    }
+
+    /// 为已绑定 Git 仓库创建/复用 worktree，并写回元数据。
+    pub async fn provision_worktree(&self, session_id: &str) -> MacoResult<()> {
+        let Some(rec) = self.meta.get(session_id).await? else {
+            return Ok(());
+        };
+
+        if rec.project_root.is_none() {
+            Self::cleanup_worktree(&rec, session_id);
+            self.meta.clear_worktree_state(session_id).await?;
+            return Ok(());
+        }
+
+        if rec.git_worktree_enabled == 0 {
+            Self::cleanup_worktree(&rec, session_id);
+            self.meta.clear_worktree_state(session_id).await?;
+            return Ok(());
+        }
+
+        let Some(ws) = resolve_session_workspace(
+            rec.project_root.as_deref(),
+            session_id,
+            true,
+            &rec.git_branch_prefix,
+        )?
+        else {
+            self.meta.clear_worktree_state(session_id).await?;
+            return Ok(());
+        };
+
+        if ws.uses_worktree {
+            let branch = ws.worktree_branch.as_deref().unwrap_or("");
+            self.meta
+                .update_worktree_state(
+                    session_id,
+                    &ws.workspace_root.to_string_lossy(),
+                    branch,
+                )
+                .await?;
+        } else {
+            self.meta.clear_worktree_state(session_id).await?;
+        }
+        Ok(())
+    }
+
+    fn cleanup_worktree(rec: &SessionMetaRecord, session_id: &str) {
+        if let Some(root) = rec.project_root.as_deref() {
+            if let Ok(Some(repo)) = resolve_project_root(Some(root)) {
+                if let Err(e) = remove_worktree(&repo, session_id) {
+                    tracing::warn!("cleanup worktree for {session_id}: {e}");
+                }
+            }
+        }
     }
 
     /// 更新会话绑定模型（元数据 + adk state_delta `user:model`）。
@@ -226,6 +324,7 @@ impl SessionFacade {
         for o in orphans {
             match o.status.as_str() {
                 "orphan_create" => {
+                    Self::cleanup_worktree(&o, &o.session_id);
                     let _ = self
                         .adk
                         .session

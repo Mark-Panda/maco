@@ -142,6 +142,7 @@ impl AppState {
             ElicitationRepo::new(db.pool.clone()),
             policies,
             mcp_pool.clone(),
+            McpServerRepo::new(db.pool.clone()),
             run_streams,
             paths.tmp_dir.clone(),
             SessionMetaRepo::new(db.pool.clone()),

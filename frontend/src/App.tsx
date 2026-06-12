@@ -19,6 +19,8 @@ import {
   fetchUsageSummary,
   getApiToken,
   getLastModelId,
+  getLastGitBranchPrefix,
+  getLastGitWorktreeEnabled,
   getLastPermissionMode,
   getLastSessionId,
   interruptChat,
@@ -26,6 +28,8 @@ import {
   listArtifacts,
   listSessions,
   setLastModelId,
+  setLastGitBranchPrefix,
+  setLastGitWorktreeEnabled,
   setLastPermissionMode,
   setLastSessionId,
   updateSession,
@@ -33,6 +37,9 @@ import {
   type ModelView,
   type SessionMeta,
   type AgentPermissionMode,
+  DEFAULT_GIT_BRANCH_PREFIX,
+  deriveWorktreeStatus,
+  friendlyWorktreeError,
   pickProjectDirectory,
   respondElicitation,
   resumeRun,
@@ -55,6 +62,7 @@ import { ElicitationModal } from "./components/ElicitationModal";
 import { HitlConfirmModal } from "./components/HitlConfirmModal";
 import { RunStatusBar } from "./components/RunStatusBar";
 import { AgentPermissionSelector } from "./components/AgentPermissionSelector";
+import { GitWorktreeToolbarControl } from "./components/GitWorktreeToolbarControl";
 import { SessionProjectBar } from "./components/SessionProjectBar";
 import { TasksDock } from "./components/TasksDock";
 import { useTasksDockWidth } from "./hooks/useTasksDockWidth";
@@ -196,6 +204,10 @@ export default function App() {
     Array<{ id: string; filename: string; mime_type: string; size_bytes: number }>
   >([]);
   const [projectRootDraft, setProjectRootDraft] = useState("");
+  const [gitWorktreeEnabled, setGitWorktreeEnabled] = useState(getLastGitWorktreeEnabled);
+  const [gitBranchPrefix, setGitBranchPrefix] = useState(getLastGitBranchPrefix);
+  const [gitWorktreePath, setGitWorktreePath] = useState<string | null>(null);
+  const [gitWorktreeBranch, setGitWorktreeBranch] = useState<string | null>(null);
   const [permissionMode, setPermissionMode] =
     useState<AgentPermissionMode>(getLastPermissionMode);
   const [pickingFolder, setPickingFolder] = useState(false);
@@ -235,7 +247,8 @@ export default function App() {
       .then((rows) => {
         setSessions(rows);
         const s = rows.find((r) => r.session_id === saved);
-        return loadSession(saved, s?.model_id, s?.project_root, s?.permission_mode);
+        if (s) return loadSession(s);
+        return loadSession({ session_id: saved } as SessionMeta);
       })
       .finally(() => setRestored(true));
   }, [models, restored]);
@@ -344,8 +357,16 @@ export default function App() {
     if (sessionId) return sessionId;
     const modelId = selectedModelId || defaultModel?.id;
     const root = projectRootDraft.trim() || undefined;
-    const s = await createSession(undefined, modelId, root, permissionMode);
+    const s = await createSession(
+      undefined,
+      modelId,
+      root,
+      permissionMode,
+      gitWorktreeEnabled,
+      gitBranchPrefix,
+    );
     setLastPermissionMode(permissionMode);
+    applyWorktreeRuntimeFromSession(s);
     sessionIdRef.current = s.session_id;
     setSessionId(s.session_id);
     setSessions(await listSessions());
@@ -358,19 +379,39 @@ export default function App() {
     setTodos(await fetchTodos(id));
   }
 
-  async function loadSession(
-    sid: string,
-    modelId?: string | null,
-    projectRoot?: string | null,
-    mode?: AgentPermissionMode | null,
-  ) {
+  function applyWorktreeRuntimeFromSession(s: SessionMeta) {
+    setGitWorktreePath(s.git_worktree_path);
+    setGitWorktreeBranch(s.git_worktree_branch);
+  }
+
+  async function loadSession(meta: SessionMeta) {
+    const sid = meta.session_id;
     sessionIdRef.current = sid;
     setSessionId(sid);
-    if (modelId) setSelectedModelId(modelId);
-    setProjectRootDraft(projectRoot ?? "");
-    const resolved = mode ?? getLastPermissionMode();
+    if (meta.model_id) setSelectedModelId(meta.model_id);
+    setProjectRootDraft(meta.project_root ?? "");
+    const resolved = meta.permission_mode ?? getLastPermissionMode();
     setPermissionMode(resolved);
     setLastPermissionMode(resolved);
+    const full = sessions.find((s) => s.session_id === sid) ?? meta;
+    applyWorktreeRuntimeFromSession(full);
+    const sessionEnabled = (full.git_worktree_enabled ?? 1) !== 0;
+    const sessionPrefix = (full.git_branch_prefix || DEFAULT_GIT_BRANCH_PREFIX).trim();
+    const globalPrefix = (gitBranchPrefix || DEFAULT_GIT_BRANCH_PREFIX).trim();
+    if (sessionEnabled !== gitWorktreeEnabled || sessionPrefix !== globalPrefix) {
+      try {
+        await updateSession(sid, {
+          git_worktree_enabled: gitWorktreeEnabled,
+          git_branch_prefix: globalPrefix,
+        });
+        const rows = await listSessions();
+        setSessions(rows);
+        const synced = rows.find((s) => s.session_id === sid);
+        if (synced) applyWorktreeRuntimeFromSession(synced);
+      } catch {
+        // 全局偏好同步失败不阻断加载会话
+      }
+    }
     setActiveRunId(null);
     setPendingConfirm(null);
     setPendingElicitation(null);
@@ -424,6 +465,12 @@ export default function App() {
   }
 
   const currentSession = sessions.find((s) => s.session_id === sessionId);
+  const worktreeStatus = deriveWorktreeStatus(
+    gitWorktreeEnabled,
+    sessionId ? currentSession?.project_root ?? projectRootDraft : projectRootDraft,
+    gitWorktreePath,
+    currentSession?.git_worktree_status,
+  );
 
   async function renameSession(sid: string, title: string) {
     await updateSession(sid, { title: title.trim() });
@@ -441,6 +488,8 @@ export default function App() {
       setPlan("");
       setTodos([]);
       setProjectRootDraft("");
+      setGitWorktreePath(null);
+      setGitWorktreeBranch(null);
       setPermissionMode(getLastPermissionMode());
       clearMessages();
     }
@@ -461,7 +510,40 @@ export default function App() {
     setPlan("");
     setTodos([]);
     setProjectRootDraft("");
+    setGitWorktreePath(null);
+    setGitWorktreeBranch(null);
     setPermissionMode(getLastPermissionMode());
+  }
+
+  async function persistGitWorktreeSettings(enabled: boolean, prefix: string) {
+    setLastGitWorktreeEnabled(enabled);
+    setLastGitBranchPrefix(prefix);
+    if (!sessionId) return;
+    try {
+      await updateSession(sessionId, {
+        git_worktree_enabled: enabled,
+        git_branch_prefix: prefix.trim() || DEFAULT_GIT_BRANCH_PREFIX,
+      });
+      const rows = await listSessions();
+      setSessions(rows);
+      const updated = rows.find((s) => s.session_id === sessionId);
+      if (updated) applyWorktreeRuntimeFromSession(updated);
+    } catch (e) {
+      pushMessage({ role: "assistant", content: friendlyWorktreeError(String(e)) });
+    }
+  }
+
+  async function changeGitWorktreeEnabled(enabled: boolean) {
+    setGitWorktreeEnabled(enabled);
+    await persistGitWorktreeSettings(enabled, gitBranchPrefix);
+  }
+
+  async function changeGitBranchPrefix(prefix: string) {
+    setGitBranchPrefix(prefix);
+  }
+
+  async function commitGitBranchPrefix() {
+    await persistGitWorktreeSettings(gitWorktreeEnabled, gitBranchPrefix);
   }
 
   async function changePermissionMode(mode: AgentPermissionMode) {
@@ -491,7 +573,10 @@ export default function App() {
       setProjectRootDraft(result.path);
       if (sessionId) {
         await updateSession(sessionId, { project_root: result.path });
-        setSessions(await listSessions());
+        const rows = await listSessions();
+        setSessions(rows);
+        const updated = rows.find((s) => s.session_id === sessionId);
+        if (updated) applyWorktreeRuntimeFromSession(updated);
       }
     } catch (e) {
       pushMessage({ role: "assistant", content: String(e) });
@@ -502,6 +587,8 @@ export default function App() {
 
   async function clearProjectRoot() {
     setProjectRootDraft("");
+    setGitWorktreePath(null);
+    setGitWorktreeBranch(null);
     if (!sessionId) return;
     try {
       await updateSession(sessionId, { project_root: "" });
@@ -694,6 +781,19 @@ export default function App() {
             <span className="toolbar-tab-label">{t.label}</span>
           </button>
         ))}
+        <div className="toolbar-bottom">
+          <GitWorktreeToolbarControl
+            enabled={gitWorktreeEnabled}
+            branchPrefix={gitBranchPrefix}
+            worktreePath={gitWorktreePath}
+            worktreeBranch={gitWorktreeBranch}
+            worktreeStatus={worktreeStatus}
+            disabled={loading}
+            onEnabledChange={changeGitWorktreeEnabled}
+            onBranchPrefixChange={changeGitBranchPrefix}
+            onBranchPrefixCommit={commitGitBranchPrefix}
+          />
+        </div>
       </nav>
 
       <div className="app-workspace">
@@ -714,9 +814,7 @@ export default function App() {
               <ChatSessionSidebar
                 sessions={sessions}
                 activeSessionId={sessionId}
-                onSelect={(s) =>
-                  loadSession(s.session_id, s.model_id, s.project_root, s.permission_mode)
-                }
+                onSelect={(s) => loadSession(s)}
                 onNewChat={startNewChat}
                 onDelete={deleteSessionById}
                 onRename={renameSession}
