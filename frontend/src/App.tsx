@@ -44,6 +44,7 @@ import { MacoIcon, type MacoIconName } from "./components/Icons";
 import { McpSettings } from "./components/McpSettings";
 import { ModelSettings } from "./components/ModelSettings";
 import { ChatMessagesPanel } from "./components/ChatMessagesPanel";
+import { ChatSessionSidebar } from "./components/ChatSessionSidebar";
 import { ElicitationModal } from "./components/ElicitationModal";
 import { HitlConfirmModal } from "./components/HitlConfirmModal";
 import { RunStatusBar } from "./components/RunStatusBar";
@@ -148,8 +149,6 @@ export default function App() {
   const [artifacts, setArtifacts] = useState<
     Array<{ id: string; filename: string; mime_type: string; size_bytes: number }>
   >([]);
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState("");
   const [projectRootDraft, setProjectRootDraft] = useState("");
   const [pickingFolder, setPickingFolder] = useState(false);
   const [restored, setRestored] = useState(false);
@@ -385,14 +384,31 @@ export default function App() {
 
   const currentSession = sessions.find((s) => s.session_id === sessionId);
 
-  async function saveSessionTitle() {
-    if (!sessionId || !titleDraft.trim()) {
-      setEditingTitle(false);
-      return;
-    }
-    await updateSession(sessionId, { title: titleDraft.trim() });
+  async function renameSession(sid: string, title: string) {
+    await updateSession(sid, { title: title.trim() });
     setSessions(await listSessions());
-    setEditingTitle(false);
+  }
+
+  async function deleteSessionById(sid: string) {
+    await deleteSession(sid);
+    if (sessionId === sid) {
+      reset();
+      setLastSessionId(null);
+      setArtifacts([]);
+      setPlan("");
+      setTodos([]);
+      setProjectRootDraft("");
+    }
+    setSessions(await listSessions());
+  }
+
+  function startNewChat() {
+    reset();
+    setLastSessionId(null);
+    setArtifacts([]);
+    setPlan("");
+    setTodos([]);
+    setProjectRootDraft("");
   }
 
   async function pickProjectFolder() {
@@ -623,215 +639,162 @@ export default function App() {
             style={{ gridTemplateColumns: `minmax(0, 1fr) ${tasksDockWidth}px` }}
           >
             <div className="chat-main">
-        <header className="app-topbar">
-          <div className="app-logo">ma<span>co</span></div>
-          <select
-            className="model-select session-select"
-            value={sessionId ?? ""}
-            onChange={(e) => {
-              const id = e.target.value;
-              if (!id) return;
-              const s = sessions.find((x) => x.session_id === id);
-              loadSession(id, s?.model_id, s?.project_root);
-            }}
-            title="切换会话"
-          >
-            {sessions.length === 0 ? (
-              <option value="">暂无会话</option>
-            ) : (
-              sessions.map((s) => (
-                <option key={s.session_id} value={s.session_id}>
-                  {s.title ?? s.session_id.slice(0, 8)}
-                </option>
-              ))
-            )}
-          </select>
-          {sessionId && (
-            editingTitle ? (
-              <input
-                className="model-select"
-                style={{ maxWidth: 200 }}
-                value={titleDraft}
-                onChange={(e) => setTitleDraft(e.target.value)}
-                onBlur={saveSessionTitle}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") saveSessionTitle();
-                  if (e.key === "Escape") setEditingTitle(false);
-                }}
-                autoFocus
+              <ChatSessionSidebar
+                sessions={sessions}
+                activeSessionId={sessionId}
+                onSelect={(s) => loadSession(s.session_id, s.model_id, s.project_root)}
+                onNewChat={startNewChat}
+                onDelete={(sid) => void deleteSessionById(sid)}
+                onRename={renameSession}
               />
-            ) : (
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                title="点击重命名"
-                onClick={() => {
-                  setTitleDraft(currentSession?.title ?? sessionId.slice(0, 8));
-                  setEditingTitle(true);
-                }}
-              >
-                {currentSession?.title ?? sessionId.slice(0, 8)}
-              </button>
-            )
-          )}
-          {sessionId && (
-            <button
-              type="button"
-              className="btn btn-sm btn-ghost"
-              title="删除当前会话"
-              onClick={async () => {
-                if (!confirm("确定删除该会话？")) return;
-                await deleteSession(sessionId);
-                reset();
-                setLastSessionId(null);
-                setArtifacts([]);
-                setSessions(await listSessions());
-              }}
-            >
-              删除
-            </button>
-          )}
-          <select
-            className="model-select"
-            value={selectedModelId}
-            onChange={(e) => setSelectedModelId(e.target.value)}
-            title="对话模型"
-          >
-            {models.length === 0 ? (
-              <option value="">无模型 — 请打开「模型」</option>
-            ) : (
-              models
-                .filter((m) => m.enabled)
-                .map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name} ({m.model_id})
-                  </option>
-                ))
-            )}
-          </select>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            onClick={() => {
-              reset();
-              setLastSessionId(null);
-              setArtifacts([]);
-              setPlan("");
-              setTodos([]);
-              setProjectRootDraft("");
-            }}
-          >
-            新对话
-          </button>
-          {sessionId && (
-            <button type="button" className="btn btn-sm" onClick={exportMd}>
-              导出
-            </button>
-          )}
-          {loading && sessionId && (
-            <button type="button" className="btn btn-sm" onClick={stopRun}>
-              停止
-            </button>
-          )}
-          {activeRunId && !loading && sessionId && (
-            <button
-              type="button"
-              className="btn btn-sm btn-ghost"
-              title="重新连接 SSE"
-              onClick={async () => {
-                setLoading(true);
-                try {
-                  await streamRun(sessionId, activeRunId, handleSse);
-                } catch (e) {
-                  pushMessage({ role: "assistant", content: String(e) });
-                } finally {
-                  setLoading(false);
-                }
-              }}
-            >
-              重连
-            </button>
-          )}
-          <div className="topbar-actions">
-            <button
-              type="button"
-              className="btn btn-sm btn-ghost btn-icon-only theme-toggle"
-              onClick={onToggleTheme}
-              title={theme === "dark" ? "切换浅色模式" : "切换深色模式"}
-              aria-label={theme === "dark" ? "切换浅色模式" : "切换深色模式"}
-            >
-              <MacoIcon name={theme === "dark" ? "sun" : "moon"} size={18} />
-            </button>
-          </div>
-        </header>
+              <div className="chat-column">
+                <header className="app-topbar">
+                  <div className="app-topbar-title">
+                    <div className="app-logo">ma<span>co</span></div>
+                    {currentSession ? (
+                      <span
+                        className="app-topbar-session"
+                        title={currentSession.title ?? currentSession.session_id}
+                      >
+                        {currentSession.title ?? currentSession.session_id.slice(0, 8)}
+                      </span>
+                    ) : (
+                      <span className="app-topbar-session app-topbar-session--muted">新对话</span>
+                    )}
+                  </div>
+                  <select
+                    className="model-select"
+                    value={selectedModelId}
+                    onChange={(e) => setSelectedModelId(e.target.value)}
+                    title="对话模型"
+                  >
+                    {models.length === 0 ? (
+                      <option value="">无模型 — 请打开「模型」</option>
+                    ) : (
+                      models
+                        .filter((m) => m.enabled)
+                        .map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.name} ({m.model_id})
+                          </option>
+                        ))
+                    )}
+                  </select>
+                  {sessionId && (
+                    <button type="button" className="btn btn-sm" onClick={exportMd}>
+                      导出
+                    </button>
+                  )}
+                  {loading && sessionId && (
+                    <button type="button" className="btn btn-sm" onClick={stopRun}>
+                      停止
+                    </button>
+                  )}
+                  {activeRunId && !loading && sessionId && (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-ghost"
+                      title="重新连接 SSE"
+                      onClick={async () => {
+                        setLoading(true);
+                        try {
+                          await streamRun(sessionId, activeRunId, handleSse);
+                        } catch (e) {
+                          pushMessage({ role: "assistant", content: String(e) });
+                        } finally {
+                          setLoading(false);
+                        }
+                      }}
+                    >
+                      重连
+                    </button>
+                  )}
+                  <div className="topbar-actions">
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-ghost btn-icon-only theme-toggle"
+                      onClick={onToggleTheme}
+                      title={theme === "dark" ? "切换浅色模式" : "切换深色模式"}
+                      aria-label={theme === "dark" ? "切换浅色模式" : "切换深色模式"}
+                    >
+                      <MacoIcon name={theme === "dark" ? "sun" : "moon"} size={18} />
+                    </button>
+                  </div>
+                </header>
 
-        <SessionProjectBar
-          projectRootDraft={projectRootDraft}
-          pickingFolder={pickingFolder}
-          hasSession={Boolean(sessionId)}
-          onPickFolder={pickProjectFolder}
-          onClear={clearProjectRoot}
-        />
+                <SessionProjectBar
+                  projectRootDraft={projectRootDraft}
+                  pickingFolder={pickingFolder}
+                  hasSession={Boolean(sessionId)}
+                  onPickFolder={pickProjectFolder}
+                  onClear={clearProjectRoot}
+                />
 
-        <ChatMessagesPanel
-          loading={loading}
-          agentActivity={agentActivity}
-          modelsEmpty={models.length === 0}
-          onOpenModels={() => navigateTo("models")}
-        />
+                <ChatMessagesPanel
+                  loading={loading}
+                  agentActivity={agentActivity}
+                  modelsEmpty={models.length === 0}
+                  onOpenModels={() => navigateTo("models")}
+                />
 
-        <div className="chat-composer">
-          <div className="chat-composer-inner">
-            <input
-              ref={fileInputRef}
-              type="file"
-              hidden
-              onChange={async (e) => {
-                const file = e.target.files?.[0];
-                if (!file) return;
-                try {
-                  const sid = await ensureSession();
-                  const art = await uploadArtifact(sid, file);
-                  setArtifacts(await listArtifacts(sid));
-                  pushMessage({
-                    role: "assistant",
-                    content: `已上传附件：${art.filename}（${art.mime_type}）`,
-                  });
-                } catch (err) {
-                  pushMessage({ role: "assistant", content: String(err) });
-                } finally {
-                  e.target.value = "";
-                }
-              }}
-            />
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm btn-icon-only"
-              title="上传附件"
-              disabled={loading}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <MacoIcon name="paperclip" size={18} />
-            </button>
-            <textarea
-              className="chat-input"
-              rows={1}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              placeholder="输入消息…（Enter 发送，Shift+Enter 换行）"
-              disabled={loading}
-            />
-            <button type="button" className="btn btn-primary" onClick={send} disabled={loading || !input.trim()}>
-              发送
-            </button>
-          </div>
-        </div>
+                <div className="chat-composer">
+                  <div className="chat-composer-inner">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      hidden
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        try {
+                          const sid = await ensureSession();
+                          const art = await uploadArtifact(sid, file);
+                          setArtifacts(await listArtifacts(sid));
+                          pushMessage({
+                            role: "assistant",
+                            content: `已上传附件：${art.filename}（${art.mime_type}）`,
+                          });
+                        } catch (err) {
+                          pushMessage({ role: "assistant", content: String(err) });
+                        } finally {
+                          e.target.value = "";
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm btn-icon-only"
+                      title="上传附件"
+                      disabled={loading}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <MacoIcon name="paperclip" size={18} />
+                    </button>
+                    <textarea
+                      className="chat-input"
+                      rows={1}
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          send();
+                        }
+                      }}
+                      placeholder="输入消息…（Enter 发送，Shift+Enter 换行）"
+                      disabled={loading}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={send}
+                      disabled={loading || !input.trim()}
+                    >
+                      发送
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
             <div className="tasks-dock-column">
               <div
