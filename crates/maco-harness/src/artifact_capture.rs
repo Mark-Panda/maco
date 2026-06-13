@@ -9,7 +9,7 @@ use maco_core::{MacoResult, SseEnvelope};
 use maco_storage::ArtifactStore;
 use maco_telemetry::MacoCallbackLogger;
 use serde_json::Value;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use maco_governance::prepare_log_payload;
 
@@ -22,19 +22,19 @@ const PREVIEW_TEXT_LIMIT: usize = 512 * 1024;
 pub fn snapshot_scratch_files(scratch_dir: &Path) -> HashSet<PathBuf> {
     let mut known = HashSet::new();
     if scratch_dir.is_dir() {
-        collect_files(scratch_dir, scratch_dir, &mut known);
+        collect_files(scratch_dir, &mut known);
     }
     known
 }
 
-fn collect_files(base: &Path, dir: &Path, out: &mut HashSet<PathBuf>) {
+fn collect_files(dir: &Path, out: &mut HashSet<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_files(base, &path, out);
+            collect_files(&path, out);
         } else if path.is_file() {
             out.insert(path);
         }
@@ -47,7 +47,7 @@ fn diff_new_scratch_files(scratch_dir: &Path, known: &mut HashSet<PathBuf>) -> V
         return fresh;
     }
     let mut current = HashSet::new();
-    collect_files(scratch_dir, scratch_dir, &mut current);
+    collect_files(scratch_dir, &mut current);
     for path in current {
         if known.insert(path.clone()) {
             fresh.push(path);
@@ -66,7 +66,14 @@ fn extract_write_paths(tool_name: &str, args: &Value) -> Vec<PathBuf> {
         return Vec::new();
     }
     let mut paths = Vec::new();
-    for key in ["path", "file_path", "filepath", "target", "destination", "file"] {
+    for key in [
+        "path",
+        "file_path",
+        "filepath",
+        "target",
+        "destination",
+        "file",
+    ] {
         if let Some(s) = args.get(key).and_then(|v| v.as_str()) {
             paths.push(expand_tilde(s));
         }
@@ -75,22 +82,22 @@ fn extract_write_paths(tool_name: &str, args: &Value) -> Vec<PathBuf> {
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
-    if path == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home);
-        }
+    if path == "~"
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home);
     }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
     PathBuf::from(path)
 }
 
 fn extract_bash_output_paths(command: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    for segment in command.split(|c| c == '|' || c == ';' || c == '&') {
+    for segment in command.split(['|', ';', '&']) {
         let segment = segment.trim();
         if let Some(idx) = segment.rfind(">>") {
             if let Some(token) = segment[idx + 2..].split_whitespace().next() {
@@ -162,15 +169,15 @@ fn path_allowed(path: &Path, scratch_dir: &Path, project_root: Option<&Path>) ->
     let Ok(canonical) = path.canonicalize() else {
         return false;
     };
-    if let Ok(scratch) = scratch_dir.canonicalize() {
-        if canonical.starts_with(&scratch) {
-            return true;
-        }
+    if let Ok(scratch) = scratch_dir.canonicalize()
+        && canonical.starts_with(&scratch)
+    {
+        return true;
     }
-    if let Some(root) = project_root {
-        if let Ok(project) = root.canonicalize() {
-            return canonical.starts_with(&project);
-        }
+    if let Some(root) = project_root
+        && let Ok(project) = root.canonicalize()
+    {
+        return canonical.starts_with(&project);
     }
     false
 }
@@ -296,6 +303,10 @@ mod tests {
         let paths = extract_bash_output_paths(
             "mkdir -p ~/Desktop/gomoku && cat > ~/Desktop/gomoku/index.html <<'EOF'",
         );
-        assert!(paths.iter().any(|p| p.ends_with("Desktop/gomoku/index.html")));
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.ends_with("Desktop/gomoku/index.html"))
+        );
     }
 }

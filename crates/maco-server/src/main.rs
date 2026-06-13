@@ -1,30 +1,43 @@
 //! maco HTTP 服务入口：`init` / `backup` 子命令与 Axum 路由装配。
 
+mod artifact_routes;
 mod auth;
+mod auth_token_routes;
+mod chat_routes;
 mod directory_picker;
 mod export;
+mod job_routes;
+mod mcp_routes;
+mod memory_routes;
+mod model_routes;
 mod models_api;
 mod openapi;
 mod routes;
+mod run_routes;
 mod session_facade;
 mod session_meta_view;
+mod session_routes;
+mod skill_routes;
 mod skills_sync;
 mod state;
+mod system_routes;
+mod tool_policy_routes;
+mod usage_routes;
 mod worker;
 
 use std::net::SocketAddr;
 
-use axum::{middleware, Router};
+use axum::{Router, middleware};
+use clap::{Parser, Subcommand};
+use maco_core::{MacoResult, ensure_data_dirs, load_config};
+use maco_db::{
+    McpServerRepo, ModelRecord, ModelRepo, SettingsRepo, seed_default_filesystem_mcp,
+    wal_checkpoint, wal_checkpoint_adk,
+};
+use maco_governance::auth_disabled;
+use maco_telemetry::init_maco_tracing;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
-use clap::{Parser, Subcommand};
-use maco_governance::auth_disabled;
-use maco_core::{ensure_data_dirs, load_config, MacoResult};
-use maco_db::{
-    seed_default_filesystem_mcp, wal_checkpoint, wal_checkpoint_adk, McpServerRepo, ModelRecord,
-    ModelRepo, SettingsRepo,
-};
-use maco_telemetry::init_maco_tracing;
 
 use crate::auth::auth_middleware;
 use crate::openapi::ApiDoc;
@@ -104,20 +117,20 @@ async fn seed_default_model(db: &maco_db::MacoDb) -> MacoResult<()> {
 
 async fn run_backup(paths: &maco_core::DataPaths) -> MacoResult<()> {
     tracing::info!("backup: WAL checkpoint (best-effort; stop server first for consistency)");
-    if paths.maco_db.exists() {
-        if let Err(e) = wal_checkpoint(&paths.maco_db).await {
-            tracing::warn!("backup: checkpoint maco.db failed: {e}");
-        }
+    if paths.maco_db.exists()
+        && let Err(e) = wal_checkpoint(&paths.maco_db).await
+    {
+        tracing::warn!("backup: checkpoint maco.db failed: {e}");
     }
-    if paths.sessions_db.exists() {
-        if let Err(e) = wal_checkpoint_adk(&paths.sessions_db).await {
-            tracing::warn!("backup: checkpoint sessions.db failed: {e}");
-        }
+    if paths.sessions_db.exists()
+        && let Err(e) = wal_checkpoint_adk(&paths.sessions_db).await
+    {
+        tracing::warn!("backup: checkpoint sessions.db failed: {e}");
     }
-    if paths.memory_db.exists() {
-        if let Err(e) = wal_checkpoint_adk(&paths.memory_db).await {
-            tracing::warn!("backup: checkpoint memory.db failed: {e}");
-        }
+    if paths.memory_db.exists()
+        && let Err(e) = wal_checkpoint_adk(&paths.memory_db).await
+    {
+        tracing::warn!("backup: checkpoint memory.db failed: {e}");
     }
 
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
@@ -138,10 +151,10 @@ async fn run_backup(paths: &maco_core::DataPaths) -> MacoResult<()> {
             }
         }
     }
-    if paths.artifacts_dir.exists() {
-        if let Err(e) = copy_dir_recursive(&paths.artifacts_dir, &dest.join("artifacts")) {
-            tracing::warn!("backup: copy artifacts failed: {e}");
-        }
+    if paths.artifacts_dir.exists()
+        && let Err(e) = copy_dir_recursive(&paths.artifacts_dir, &dest.join("artifacts"))
+    {
+        tracing::warn!("backup: copy artifacts failed: {e}");
     }
 
     tracing::info!(
@@ -173,13 +186,15 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> MacoResul
 }
 
 async fn run_server(bind: String, paths: maco_core::DataPaths) -> MacoResult<()> {
-    if !bind.starts_with("127.0.0.1") && std::env::var("MACO_BIND_EXPLICIT").ok().as_deref() != Some("1") {
+    if !bind.starts_with("127.0.0.1")
+        && std::env::var("MACO_BIND_EXPLICIT").ok().as_deref() != Some("1")
+    {
         return Err(maco_core::MacoError::config(
             "refusing non-localhost bind; set MACO_BIND_EXPLICIT=1",
         ));
     }
     let state = AppState::new(bind.clone(), &paths.maco_db, &paths).await?;
-    worker::spawn_job_worker(state.jobs.clone());
+    worker::spawn_job_worker(state.repos.jobs.clone());
     let auth_on = !auth_disabled();
     if auth_on {
         tracing::info!("auth enabled (set MACO_AUTH_DISABLED=true to disable)");
@@ -188,9 +203,14 @@ async fn run_server(bind: String, paths: maco_core::DataPaths) -> MacoResult<()>
     let app = Router::new()
         .nest("/api", api_router())
         .merge(SwaggerUi::new("/api/docs").url("/api/openapi.json", openapi))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .with_state(state);
-    let addr: SocketAddr = bind.parse().map_err(|e| maco_core::MacoError::config(format!("{e}")))?;
+    let addr: SocketAddr = bind
+        .parse()
+        .map_err(|e| maco_core::MacoError::config(format!("{e}")))?;
     tracing::info!("maco listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr)
         .await

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   addMemory,
   createApiToken,
@@ -9,14 +9,11 @@ import {
   exportSessionUrl,
   deleteSession,
   fetchActiveRun,
-  fetchJobs,
-  fetchMemories,
   fetchModels,
   fetchPlan,
   fetchRun,
   fetchSessionMessages,
   fetchTodos,
-  fetchUsageSummary,
   getApiToken,
   getLastModelId,
   getLastGitBranchPrefix,
@@ -33,7 +30,6 @@ import {
   setLastPermissionMode,
   setLastSessionId,
   updateSession,
-  type JobRecord,
   type ModelView,
   type SessionMeta,
   type AgentPermissionMode,
@@ -58,8 +54,6 @@ import {
 } from "./api/client";
 import { MacoIcon, type MacoIconName } from "./components/Icons";
 import { useConfirmDialog } from "./hooks/useConfirmDialog";
-import { McpSettings } from "./components/McpSettings";
-import { ModelSettings } from "./components/ModelSettings";
 import { ChatMessagesPanel } from "./components/ChatMessagesPanel";
 import { ChatSessionSidebar } from "./components/ChatSessionSidebar";
 import { ElicitationModal } from "./components/ElicitationModal";
@@ -67,6 +61,7 @@ import { HitlConfirmModal } from "./components/HitlConfirmModal";
 import { RunStatusBar } from "./components/RunStatusBar";
 import { AgentPermissionSelector } from "./components/AgentPermissionSelector";
 import { GitWorktreeToolbarControl } from "./components/GitWorktreeToolbarControl";
+import { LazyPanelBoundary } from "./components/LazyPanelBoundary";
 import { SessionProjectBar } from "./components/SessionProjectBar";
 import { TasksDock } from "./components/TasksDock";
 import { useTasksDockWidth } from "./hooks/useTasksDockWidth";
@@ -75,33 +70,28 @@ import {
   upsertSubAgentActivity,
   type SubAgentActivityMap,
 } from "./types/subAgentActivity";
-import { SkillsPanel } from "./components/SkillsPanel";
-import { ToolPolicySettings } from "./components/ToolPolicySettings";
+import { useRunStreamState } from "./hooks/useRunStreamState";
 import { useStreamingAssistantBuffer } from "./hooks/useStreamingAssistantBuffer";
+import { useToolPanelData } from "./hooks/useToolPanelData";
 import { useChatStore } from "./store/chat";
 import { applyTheme, getTheme, type Theme, toggleTheme as flipTheme } from "./theme";
+import { dispatchSseEvent } from "./utils/sseDispatcher";
+import type { SseEvent } from "./types/sse";
 
-type SseEvent = {
-  type: string;
-  run_id?: string;
-  payload?: {
-    content?: string;
-    message?: string;
-    tool_name?: string;
-    name?: string;
-    args?: Record<string, unknown>;
-    task_key?: string;
-    worker_agent?: string;
-    sub_agent?: boolean;
-    elicitation_id?: string;
-    request_type?: string;
-    url?: string;
-    id?: string;
-    filename?: string;
-    mime_type?: string;
-    size_bytes?: number;
-  };
-};
+const McpSettings = lazy(() =>
+  import("./components/McpSettings").then((module) => ({ default: module.McpSettings })),
+);
+const ModelSettings = lazy(() =>
+  import("./components/ModelSettings").then((module) => ({ default: module.ModelSettings })),
+);
+const SkillsPanel = lazy(() =>
+  import("./components/SkillsPanel").then((module) => ({ default: module.SkillsPanel })),
+);
+const ToolPolicySettings = lazy(() =>
+  import("./components/ToolPolicySettings").then((module) => ({
+    default: module.ToolPolicySettings,
+  })),
+);
 
 type ToolTab = "memory" | "skills" | "usage" | "jobs" | "models" | "mcp" | "toolPolicies" | "settings";
 type AppView = "chat" | ToolTab;
@@ -136,10 +126,6 @@ export default function App() {
     url?: string;
   } | null>(null);
   const [elicitationInput, setElicitationInput] = useState("{}");
-  const [usage, setUsage] = useState<Array<{ key: string; total_tokens: number; estimated_cost: number }>>([]);
-  const [usageError, setUsageError] = useState<string | null>(null);
-  const [memories, setMemories] = useState<Array<{ id: number; content: string; timestamp: string }>>([]);
-  const [memoryError, setMemoryError] = useState<string | null>(null);
   const [memoryInput, setMemoryInput] = useState("");
   const [memoryDeleteQ, setMemoryDeleteQ] = useState("");
   const [models, setModels] = useState<ModelView[]>([]);
@@ -156,50 +142,6 @@ export default function App() {
     setTheme((current) => flipTheme(current));
   }
 
-  function refreshUsage() {
-    return fetchUsageSummary("model")
-      .then((rows) => {
-        setUsage(
-          rows.map((r) => ({
-            key: r.key,
-            total_tokens: r.total_tokens,
-            estimated_cost: r.estimated_cost,
-          })),
-        );
-        setUsageError(null);
-      })
-      .catch((err: unknown) => {
-        setUsage([]);
-        setUsageError(err instanceof Error ? err.message : "加载用量失败");
-      });
-  }
-
-  function refreshMemories() {
-    return fetchMemories()
-      .then((r) => {
-        setMemories(r.items);
-        setMemoryError(null);
-      })
-      .catch((err: unknown) => {
-        setMemories([]);
-        setMemoryError(err instanceof Error ? err.message : "加载记忆失败");
-      });
-  }
-
-  function navigateTo(view: AppView) {
-    setAppView(view);
-    if (view === "chat" && sessionId) {
-      refreshTasks(sessionId).catch(() => undefined);
-      listArtifacts(sessionId).then(setArtifacts).catch(() => setArtifacts([]));
-    }
-    if (view === "usage") {
-      refreshUsage().catch(() => undefined);
-    }
-    if (view === "memory") {
-      refreshMemories().catch(() => undefined);
-    }
-  }
-  const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [jobName, setJobName] = useState("");
   const { runConfirm, dialog: confirmDialog } = useConfirmDialog();
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
@@ -230,17 +172,21 @@ export default function App() {
   const [restored, setRestored] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatAbortRef = useRef<AbortController | null>(null);
-  const sessionIdRef = useRef<string | null>(sessionId);
-  const activeRunIdRef = useRef<string | null>(null);
+  const handleSseRef = useRef<(raw: Record<string, unknown>) => void>(() => undefined);
   const lastSseAtRef = useRef(Date.now());
-
-  useEffect(() => {
-    sessionIdRef.current = sessionId;
-  }, [sessionId]);
-
-  useEffect(() => {
-    activeRunIdRef.current = activeRunId;
-  }, [activeRunId]);
+  const loadSessionRequestRef = useRef(0);
+  const runStreamState = useRunStreamState(sessionId, activeRunId);
+  const { sessionIdRef, activeRunIdRef } = runStreamState;
+  const {
+    usage,
+    usageError,
+    memories,
+    memoryError,
+    jobs,
+    refreshUsage,
+    refreshMemories,
+    refreshJobs,
+  } = useToolPanelData(sessionId);
 
   useEffect(() => {
     if (sessionId) {
@@ -296,6 +242,8 @@ export default function App() {
         return loadSession({ session_id: saved } as SessionMeta);
       })
       .finally(() => setRestored(true));
+    // 只在模型加载完成后的首次恢复阶段运行；loadSession 捕获当前 request id 做过期保护。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [models, restored]);
 
   useEffect(() => {
@@ -317,14 +265,6 @@ export default function App() {
       .catch(() => setTokenList([]));
   }, []);
 
-  useEffect(() => {
-    refreshUsage().catch(() => undefined);
-    refreshMemories().catch(() => undefined);
-    fetchJobs()
-      .then(setJobs)
-      .catch(() => setJobs([]));
-  }, [sessionId]);
-
   async function reloadSessionMessages(sid: string) {
     try {
       const hist = await fetchSessionMessages(sid);
@@ -340,8 +280,10 @@ export default function App() {
   }
 
   async function finalizeRunState(sid: string, reloadMessages = false) {
+    const completedRunId = activeRunIdRef.current;
     flushAssistantStream();
     setActiveRunId(null);
+    if (completedRunId) runStreamState.clearRun(completedRunId);
     setLoading(false);
     setAgentActivity(null);
     setSubAgentActivity({});
@@ -370,135 +312,182 @@ export default function App() {
         .catch(() => undefined);
     }, 5000);
     return () => window.clearInterval(timer);
+    // 轮询只随 loading/session 启停；refs 保持最新状态，避免每次事件处理重建 interval。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, sessionId]);
 
   function handleSse(raw: Record<string, unknown>) {
     lastSseAtRef.current = Date.now();
-    const ev = raw as SseEvent & { event_type?: string };
-    const type = ev.type ?? ev.event_type;
+    const ev = raw as SseEvent;
     const activeSessionId = sessionIdRef.current;
-    if (ev.run_id) setActiveRunId(ev.run_id);
-    if (type === "text" && ev.payload?.content) {
-      appendChunk(ev.payload.content);
+    runStreamState.recordEvent(ev);
+    if (ev.run_id) {
+      setActiveRunId(ev.run_id);
     }
-    if (type === "sub_agent_progress" && ev.payload?.content) {
-      const taskKey = String(ev.payload.task_key ?? "");
-      const worker = ev.payload.worker_agent as string | undefined;
-      const content = String(ev.payload.content);
-      if (taskKey) {
-        setSubAgentActivity((prev) =>
-          upsertSubAgentActivity(prev, taskKey, {
-            last_progress: content,
-            worker_agent: worker,
-          }),
-        );
-      }
-      const snippet = content.slice(0, 120);
-      setAgentActivity(`子任务 ${taskKey || "子任务"}：${snippet}`);
-    }
-    if (type === "sub_agent_cancelled") {
-      const taskKey = String(ev.payload?.task_key ?? "");
-      if (taskKey) {
-        setSubAgentActivity((prev) => {
-          const next = { ...prev };
-          delete next[taskKey];
-          return next;
-        });
-      }
-      setAgentActivity(`子任务 ${taskKey || "子任务"}已取消`);
-    }
-    if (type === "agent_activity" && ev.payload?.message) {
-      setAgentActivity(String(ev.payload.message));
-    }
-    if (type === "tool_call") {
-      const toolName = String(ev.payload?.name ?? "unknown");
-      const subKey = ev.payload?.task_key as string | undefined;
-      const isSub = Boolean(ev.payload?.sub_agent);
-      dropAssistantTurnBeforeTool();
-      if (!isSub && toolName === "spawn_sub_agent") {
-        const args = ev.payload?.args as Record<string, unknown> | undefined;
-        const tk = typeof args?.task_key === "string" ? args.task_key.trim() : "";
-        if (tk) {
+    dispatchSseEvent(ev, {
+      text: (event) => {
+        if (event.payload?.content) appendChunk(event.payload.content);
+      },
+      sub_agent_progress: (event) => {
+        const payload = event.payload;
+        if (!payload?.content) return;
+        const taskKey = String(payload.task_key ?? "");
+        const worker = payload.worker_agent as string | undefined;
+        const content = String(payload.content);
+        if (taskKey) {
           setSubAgentActivity((prev) =>
-            upsertSubAgentActivity(prev, tk, {
-              started_at: Date.now(),
-              worker_agent: `worker-${tk}`,
+            upsertSubAgentActivity(prev, taskKey, {
+              last_progress: content,
+              worker_agent: worker,
             }),
           );
         }
-      }
-      if (isSub && subKey) {
-        setSubAgentActivity((prev) =>
-          upsertSubAgentActivity(prev, subKey, { last_tool: toolName }),
+        const snippet = content.slice(0, 120);
+        setAgentActivity(`子任务 ${taskKey || "子任务"}：${snippet}`);
+      },
+      sub_agent_cancelled: (event) => {
+        const taskKey = String(event.payload?.task_key ?? "");
+        if (taskKey) {
+          setSubAgentActivity((prev) => {
+            const next = { ...prev };
+            delete next[taskKey];
+            return next;
+          });
+        }
+        setAgentActivity(`子任务 ${taskKey || "子任务"}已取消`);
+      },
+      agent_activity: (event) => {
+        if (event.payload?.message) setAgentActivity(String(event.payload.message));
+      },
+      tool_call: (event) => {
+        const payload = event.payload;
+        const toolName = String(payload?.name ?? "unknown");
+        const subKey = payload?.task_key as string | undefined;
+        const isSub = Boolean(payload?.sub_agent);
+        dropAssistantTurnBeforeTool();
+        if (!isSub && toolName === "spawn_sub_agent") {
+          const args = payload?.args as Record<string, unknown> | undefined;
+          const tk = typeof args?.task_key === "string" ? args.task_key.trim() : "";
+          if (tk) {
+            setSubAgentActivity((prev) =>
+              upsertSubAgentActivity(prev, tk, {
+                started_at: Date.now(),
+                worker_agent: `worker-${tk}`,
+              }),
+            );
+          }
+        }
+        if (isSub && subKey) {
+          setSubAgentActivity((prev) =>
+            upsertSubAgentActivity(prev, subKey, { last_tool: toolName }),
+          );
+        }
+        setAgentActivity(
+          isSub && subKey ? `子任务 ${subKey}：${toolName}` : `正在调用工具：${toolName}`,
         );
-      }
-      setAgentActivity(
-        isSub && subKey
-          ? `子任务 ${subKey}：${toolName}`
-          : `正在调用工具：${toolName}`,
-      );
-    }
-    if (type === "tool_confirm_request" && ev.run_id && ev.payload?.tool_name) {
-      dropAssistantTurnBeforeTool();
-      setPendingConfirm({
-        runId: ev.run_id,
-        toolName: ev.payload.tool_name,
-        toolArgs: (ev.payload.args as Record<string, unknown> | undefined) ?? null,
-      });
-      setAgentActivity(`等待确认工具：${ev.payload.tool_name}`);
-    }
-    if (type === "elicitation_request" && ev.payload?.elicitation_id) {
-      setPendingElicitation({
-        id: ev.payload.elicitation_id,
-        requestType: ev.payload.request_type ?? "form",
-        message: ev.payload.message ?? "需要补充输入",
-        url: ev.payload.url,
-      });
-      setAgentActivity("等待 MCP 补充输入");
-    }
-    if (type === "error" && ev.payload?.message) {
-      flushAssistantStream();
-      pushMessage({ role: "assistant", content: `错误：${ev.payload.message}` });
-      setLoading(false);
-      setAgentActivity(null);
-      setActiveRunId(null);
-      setSubAgentActivity({});
-      setPendingConfirm(null);
-      setPendingElicitation(null);
-    }
-    if (type === "artifact_created" && ev.payload?.id && ev.payload.filename) {
-      const item = {
-        id: ev.payload.id,
-        filename: ev.payload.filename,
-        mime_type: ev.payload.mime_type ?? "application/octet-stream",
-        size_bytes: ev.payload.size_bytes ?? 0,
-      };
-      setArtifacts((prev) => {
-        if (prev.some((a) => a.id === item.id)) return prev;
-        return [item, ...prev];
-      });
-    }
-    if (type === "tasks_updated" && activeSessionId) {
-      refreshTasks(activeSessionId).catch(() => undefined);
-    }
-    if (type === "awaiting_user") {
-      setLoading(true);
-      setAgentActivity("等待你的确认…");
-    }
-    if (type === "done") {
-      const sid = activeSessionId ?? sessionIdRef.current;
-      if (sid) {
-        finalizeRunState(sid, false).catch(() => undefined);
-      } else {
+      },
+      tool_confirm_request: (event) => {
+        const payload = event.payload;
+        if (!event.run_id || !payload?.tool_name) return;
+        dropAssistantTurnBeforeTool();
+        setPendingConfirm({
+          runId: event.run_id,
+          toolName: payload.tool_name,
+          toolArgs: (payload.args as Record<string, unknown> | undefined) ?? null,
+        });
+        setAgentActivity(`等待确认工具：${payload.tool_name}`);
+      },
+      elicitation_request: (event) => {
+        const payload = event.payload;
+        if (!payload?.elicitation_id) return;
+        setPendingElicitation({
+          id: payload.elicitation_id,
+          requestType: payload.request_type ?? "form",
+          message: payload.message ?? "需要补充输入",
+          url: payload.url,
+        });
+        setAgentActivity("等待 MCP 补充输入");
+      },
+      error: (event) => {
+        const message = event.payload?.message;
+        if (!message) return;
         flushAssistantStream();
-        setActiveRunId(null);
+        pushMessage({ role: "assistant", content: `错误：${message}` });
         setLoading(false);
         setAgentActivity(null);
+        setActiveRunId(null);
         setSubAgentActivity({});
         setPendingConfirm(null);
         setPendingElicitation(null);
-      }
-    }
+      },
+      artifact_created: (event) => {
+        const payload = event.payload;
+        if (!payload?.id || !payload.filename) return;
+        const item = {
+          id: payload.id,
+          filename: payload.filename,
+          mime_type: payload.mime_type ?? "application/octet-stream",
+          size_bytes: payload.size_bytes ?? 0,
+        };
+        setArtifacts((prev) => {
+          if (prev.some((a) => a.id === item.id)) return prev;
+          return [item, ...prev];
+        });
+      },
+      tasks_updated: () => {
+        if (activeSessionId) refreshTasks(activeSessionId).catch(() => undefined);
+      },
+      awaiting_user: () => {
+        setLoading(true);
+        setAgentActivity("等待你的确认…");
+      },
+      stream_gap: () => {
+        setAgentActivity("Run 回放存在缺口，正在以会话最终状态为准…");
+        if (activeSessionId) {
+          reloadSessionMessages(activeSessionId).catch(() => undefined);
+        }
+      },
+      stream_unavailable: (event) => {
+        flushAssistantStream();
+        setAgentActivity(
+          event.payload?.live_stream
+            ? "Run 仍在进行，但当前实时流不可用；请稍后刷新状态"
+            : "Run 流不可用",
+        );
+        setLoading(Boolean(event.payload?.live_stream));
+      },
+      stream_ended: () => {
+        if (activeSessionId) {
+          finalizeRunState(activeSessionId, true).catch(() => undefined);
+        } else {
+          flushAssistantStream();
+          setActiveRunId(null);
+          setLoading(false);
+          setAgentActivity(null);
+        }
+      },
+      done: () => {
+        if (activeSessionId) {
+          finalizeRunState(activeSessionId, false).catch(() => undefined);
+        } else {
+          flushAssistantStream();
+          setActiveRunId(null);
+          setLoading(false);
+          setAgentActivity(null);
+          setSubAgentActivity({});
+          setPendingConfirm(null);
+          setPendingElicitation(null);
+        }
+      },
+    });
+  }
+
+  useLayoutEffect(() => {
+    handleSseRef.current = handleSse;
+  });
+
+  function handleSseLatest(raw: Record<string, unknown>) {
+    handleSseRef.current(raw);
   }
 
   async function ensureSession() {
@@ -522,11 +511,25 @@ export default function App() {
   }
 
   async function refreshTasks(id: string) {
-    const p = await fetchPlan(id);
+    const [p, todoRows] = await Promise.all([fetchPlan(id), fetchTodos(id)]);
+    if (sessionIdRef.current !== id) return;
     setPlan(p?.content ?? "");
-    const todoRows = await fetchTodos(id);
     setTodos(todoRows);
     setSubAgentActivity((prev) => pruneCompletedSubAgentActivity(prev, todoRows));
+  }
+
+  function navigateTo(view: AppView) {
+    setAppView(view);
+    if (view === "chat" && sessionId) {
+      refreshTasks(sessionId).catch(() => undefined);
+      listArtifacts(sessionId).then(setArtifacts).catch(() => setArtifacts([]));
+    }
+    if (view === "usage") {
+      refreshUsage().catch(() => undefined);
+    }
+    if (view === "memory") {
+      refreshMemories().catch(() => undefined);
+    }
   }
 
   function applyWorktreeRuntimeFromSession(s: SessionMeta) {
@@ -552,6 +555,7 @@ export default function App() {
   }
 
   async function loadSession(meta: SessionMeta) {
+    const requestId = ++loadSessionRequestRef.current;
     const sid = meta.session_id;
     sessionIdRef.current = sid;
     setSessionId(sid);
@@ -569,6 +573,7 @@ export default function App() {
     setPendingElicitation(null);
     try {
       const hist = await fetchSessionMessages(sid);
+      if (requestId !== loadSessionRequestRef.current || sessionIdRef.current !== sid) return;
       setMessages(
         hist.messages.map((m) => ({
           role: m.role === "user" ? "user" : "assistant",
@@ -576,11 +581,14 @@ export default function App() {
         })),
       );
       await refreshTasks(sid);
+      if (requestId !== loadSessionRequestRef.current || sessionIdRef.current !== sid) return;
       const active = await fetchActiveRun(sid);
+      if (requestId !== loadSessionRequestRef.current || sessionIdRef.current !== sid) return;
       if (active.run_id) {
         setActiveRunId(active.run_id);
         try {
           const run = await fetchRun(sid, active.run_id);
+          if (requestId !== loadSessionRequestRef.current || sessionIdRef.current !== sid) return;
           if (run.pending_tools.length > 0) {
             const tool = run.pending_tools[0];
             setPendingConfirm({
@@ -606,7 +614,12 @@ export default function App() {
             setAgentActivity("思考中…");
             if (active.source !== "db") {
               try {
-                await streamRun(sid, active.run_id, handleSse);
+                await streamRun(
+                  sid,
+                  active.run_id,
+                  handleSseLatest,
+                  runStreamState.afterSeqForRun(active.run_id),
+                );
               } catch {
                 setLoading(false);
                 setAgentActivity(null);
@@ -618,6 +631,7 @@ export default function App() {
         }
       }
       const arts = await listArtifacts(sid);
+      if (requestId !== loadSessionRequestRef.current || sessionIdRef.current !== sid) return;
       setArtifacts(arts);
     } catch {
       clearMessages();
@@ -648,6 +662,7 @@ export default function App() {
     const previous = sessions;
     setSessions((prev) => prev.filter((s) => s.session_id !== sid));
     if (sessionId === sid) {
+      loadSessionRequestRef.current += 1;
       sessionIdRef.current = null;
       reset();
       setLastSessionId(null);
@@ -671,6 +686,7 @@ export default function App() {
   }
 
   function startNewChat() {
+    loadSessionRequestRef.current += 1;
     reset();
     setLastSessionId(null);
     setArtifacts([]);
@@ -798,7 +814,7 @@ export default function App() {
       chatAbortRef.current?.abort();
       const ac = new AbortController();
       chatAbortRef.current = ac;
-      await streamChat(sid, text, handleSse, selectedModelId || undefined, ac.signal);
+      await streamChat(sid, text, handleSseLatest, selectedModelId || undefined, ac.signal);
       chatAbortRef.current = null;
       await refreshTasks(sid);
       setArtifacts(await listArtifacts(sid));
@@ -811,21 +827,24 @@ export default function App() {
         pushMessage({ role: "assistant", content: friendlyWorktreeError(String(e)) });
       }
     } finally {
+      let finalized = false;
       const sid = sessionIdRef.current;
       if (sid && activeRunIdRef.current) {
         try {
           const active = await fetchActiveRun(sid);
           if (!active.run_id) {
             await finalizeRunState(sid, true);
-            return;
+            finalized = true;
           }
         } catch {
           // fall through to default cleanup
         }
       }
-      flushAssistantStream();
-      setLoading(false);
-      setAgentActivity(null);
+      if (!finalized) {
+        flushAssistantStream();
+        setLoading(false);
+        setAgentActivity(null);
+      }
     }
   }
 
@@ -834,7 +853,7 @@ export default function App() {
     if (!active.run_id) return;
     setActiveRunId(active.run_id);
     if (active.source === "db") return;
-    await streamRun(sid, active.run_id, handleSse);
+    await streamRun(sid, active.run_id, handleSseLatest, runStreamState.afterSeqForRun(active.run_id));
   }
 
   async function retryWorktreeProvision() {
@@ -895,7 +914,7 @@ export default function App() {
         sessionId,
         pendingConfirm.runId,
         approved,
-        handleSse,
+        handleSseLatest,
       );
       setPendingConfirm(null);
       setAgentActivity(approved ? "工具已批准，继续执行…" : null);
@@ -1075,7 +1094,12 @@ export default function App() {
                       onClick={async () => {
                         setLoading(true);
                         try {
-                          await streamRun(sessionId, activeRunId, handleSse);
+                          await streamRun(
+                            sessionId,
+                            activeRunId,
+                            handleSseLatest,
+                            runStreamState.afterSeqForRun(activeRunId),
+                          );
                         } catch (e) {
                           if (!isStreamAbortError(e)) {
                             pushMessage({ role: "assistant", content: String(e) });
@@ -1313,7 +1337,13 @@ export default function App() {
             </div>
           )}
 
-          {appView === "skills" && <SkillsPanel />}
+          {appView === "skills" && (
+            <LazyPanelBoundary fallback={<p className="panel-empty panel-error">Skill 管理加载失败。</p>}>
+              <Suspense fallback={<p className="panel-empty">正在加载 Skill 管理…</p>}>
+                <SkillsPanel />
+              </Suspense>
+            </LazyPanelBoundary>
+          )}
 
           {appView === "usage" && (
             <div className="panel-section">
@@ -1366,7 +1396,7 @@ export default function App() {
                       disabled={paused}
                       onClick={async () => {
                         await runJobNow(j.id);
-                        setJobs(await fetchJobs());
+                        await refreshJobs();
                       }}
                     >
                       立即执行
@@ -1376,7 +1406,7 @@ export default function App() {
                       className="btn btn-sm"
                       onClick={async () => {
                         await updateJobEnabled(j.id, paused);
-                        setJobs(await fetchJobs());
+                        await refreshJobs();
                       }}
                     >
                       {paused ? "恢复" : "暂停"}
@@ -1394,7 +1424,7 @@ export default function App() {
                           },
                           async () => {
                             await deleteJob(j.id);
-                            setJobs(await fetchJobs());
+                            await refreshJobs();
                           },
                         );
                       }}
@@ -1425,7 +1455,7 @@ export default function App() {
                     run_at: new Date().toISOString(),
                   });
                   setJobName("");
-                  setJobs(await fetchJobs());
+                  await refreshJobs();
                 }}
               >
                 创建任务
@@ -1434,19 +1464,35 @@ export default function App() {
           )}
 
           {appView === "models" && (
-            <ModelSettings
-              models={models}
-              onChange={(list) => {
-                setModels(list);
-                const def = list.find((m) => m.is_default) ?? list[0];
-                if (def) setSelectedModelId(def.id);
-              }}
-            />
+            <LazyPanelBoundary fallback={<p className="panel-empty panel-error">模型设置加载失败。</p>}>
+              <Suspense fallback={<p className="panel-empty">正在加载模型设置…</p>}>
+                <ModelSettings
+                  models={models}
+                  onChange={(list) => {
+                    setModels(list);
+                    const def = list.find((m) => m.is_default) ?? list[0];
+                    if (def) setSelectedModelId(def.id);
+                  }}
+                />
+              </Suspense>
+            </LazyPanelBoundary>
           )}
 
-          {appView === "mcp" && <McpSettings />}
+          {appView === "mcp" && (
+            <LazyPanelBoundary fallback={<p className="panel-empty panel-error">MCP 设置加载失败。</p>}>
+              <Suspense fallback={<p className="panel-empty">正在加载 MCP 设置…</p>}>
+                <McpSettings />
+              </Suspense>
+            </LazyPanelBoundary>
+          )}
 
-          {appView === "toolPolicies" && <ToolPolicySettings />}
+          {appView === "toolPolicies" && (
+            <LazyPanelBoundary fallback={<p className="panel-empty panel-error">工具策略加载失败。</p>}>
+              <Suspense fallback={<p className="panel-empty">正在加载工具策略…</p>}>
+                <ToolPolicySettings />
+              </Suspense>
+            </LazyPanelBoundary>
+          )}
 
           {appView === "settings" && (
             <>

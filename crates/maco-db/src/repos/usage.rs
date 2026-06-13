@@ -55,6 +55,7 @@ impl UsageRepo {
         Self { pool }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert(
         &self,
         session_id: Option<&str>,
@@ -130,7 +131,14 @@ impl UsageRepo {
         Ok(rows
             .into_iter()
             .map(
-                |(key, prompt_tokens, completion_tokens, total_tokens, estimated_cost, request_count)| {
+                |(
+                    key,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    estimated_cost,
+                    request_count,
+                )| {
                     UsageSummaryItem {
                         key,
                         prompt_tokens,

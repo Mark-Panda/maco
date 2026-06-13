@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use maco_core::{adk_memory_url, MacoError, MacoResult, APP_NAME, USER_ID};
+use maco_core::{APP_NAME, MacoError, MacoResult, USER_ID, adk_memory_url};
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;

@@ -11,6 +11,7 @@ use adk_tool::mcp::McpServerConfig;
 use adk_tool::{ElicitationHandler, McpHttpClientBuilder, McpServerManager};
 use maco_core::{MacoError, MacoResult};
 use maco_db::{FILESYSTEM_MCP_NAME, McpServerRecord, McpServerRepo};
+use serde::Serialize;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -27,6 +28,57 @@ pub struct McpPool {
 struct McpPoolState {
     manager: Arc<McpServerManager>,
     http_toolsets: HashMap<String, Arc<dyn Toolset>>,
+    statuses: Vec<McpServerStatus>,
+}
+
+/// 单个 MCP server 的运行态状态，供 health API 与排障使用。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub transport: String,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+impl McpServerStatus {
+    pub fn connected(name: &str, transport: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            transport: transport.to_string(),
+            status: "connected".into(),
+            error: None,
+        }
+    }
+
+    pub fn failed(name: &str, transport: &str, error: impl ToString) -> Self {
+        Self {
+            name: name.to_string(),
+            transport: transport.to_string(),
+            status: "failed".into(),
+            error: Some(error.to_string()),
+        }
+    }
+}
+
+/// MCP pool 聚合健康状态。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct McpPoolHealth {
+    pub overall: String,
+    pub servers: Vec<McpServerStatus>,
+}
+
+impl McpPoolHealth {
+    pub fn from_statuses(servers: Vec<McpServerStatus>) -> Self {
+        let overall = if servers.iter().any(|s| s.status == "failed") {
+            "degraded"
+        } else {
+            "ok"
+        };
+        Self {
+            overall: overall.into(),
+            servers,
+        }
+    }
 }
 
 impl McpPool {
@@ -35,9 +87,10 @@ impl McpPool {
         elicitation: Arc<DynamicElicitationHandler>,
         tmp_dir: PathBuf,
     ) -> Self {
-        let manager = Arc::new(McpServerManager::new(HashMap::new()).with_elicitation_handler(
-            elicitation.clone() as Arc<dyn ElicitationHandler>,
-        ));
+        let manager = Arc::new(
+            McpServerManager::new(HashMap::new())
+                .with_elicitation_handler(elicitation.clone() as Arc<dyn ElicitationHandler>),
+        );
         Self {
             repo,
             elicitation,
@@ -45,6 +98,7 @@ impl McpPool {
             inner: Arc::new(RwLock::new(McpPoolState {
                 manager,
                 http_toolsets: HashMap::new(),
+                statuses: Vec::new(),
             })),
         }
     }
@@ -61,15 +115,25 @@ impl McpPool {
     pub async fn reload(&self) -> MacoResult<()> {
         let records = self.repo.list_enabled().await?;
         let mut stdio_configs: HashMap<String, McpServerConfig> = HashMap::new();
+        let mut stdio_names: Vec<String> = Vec::new();
         let mut sse_records: Vec<McpServerRecord> = Vec::new();
+        let mut statuses: Vec<McpServerStatus> = Vec::new();
 
         for rec in records {
             if rec.name == FILESYSTEM_MCP_NAME {
                 continue;
             }
             if rec.transport == "stdio" {
-                if let Some(cfg) = record_to_stdio_config(&rec, &self.tmp_dir)? {
-                    stdio_configs.insert(rec.name.clone(), cfg);
+                match record_to_stdio_config(&rec, &self.tmp_dir) {
+                    Ok(Some(cfg)) => {
+                        stdio_names.push(rec.name.clone());
+                        stdio_configs.insert(rec.name.clone(), cfg);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!("mcp stdio server config invalid {}: {e}", rec.name);
+                        statuses.push(McpServerStatus::failed(&rec.name, "stdio", e));
+                    }
                 }
             } else if rec.transport == "sse" {
                 sse_records.push(rec);
@@ -83,10 +147,24 @@ impl McpPool {
         );
 
         let start_results = manager.start_all().await;
-        for (name, res) in &start_results {
-            match res {
-                Ok(()) => info!("mcp stdio server started: {name}"),
-                Err(e) => warn!("mcp stdio server failed to start {name}: {e}"),
+        for name in stdio_names {
+            match start_results.get(&name) {
+                Some(Ok(())) => {
+                    info!("mcp stdio server started: {name}");
+                    statuses.push(McpServerStatus::connected(&name, "stdio"));
+                }
+                Some(Err(e)) => {
+                    warn!("mcp stdio server failed to start {name}: {e}");
+                    statuses.push(McpServerStatus::failed(&name, "stdio", e));
+                }
+                None => {
+                    warn!("mcp stdio server did not report startup status: {name}");
+                    statuses.push(McpServerStatus::failed(
+                        &name,
+                        "stdio",
+                        "server did not report startup status",
+                    ));
+                }
             }
         }
 
@@ -107,14 +185,19 @@ impl McpPool {
                     info!("mcp sse server connected: {}", rec.name);
                     let arc: Arc<dyn Toolset> = Arc::new(toolset);
                     http_toolsets.insert(rec.name.clone(), arc);
+                    statuses.push(McpServerStatus::connected(&rec.name, "sse"));
                 }
-                Err(e) => warn!("mcp sse server {} connect failed: {e}", rec.name),
+                Err(e) => {
+                    warn!("mcp sse server {} connect failed: {e}", rec.name);
+                    statuses.push(McpServerStatus::failed(&rec.name, "sse", e));
+                }
             }
         }
 
         let mut guard = self.inner.write().await;
         guard.manager = manager;
         guard.http_toolsets = http_toolsets;
+        guard.statuses = statuses;
         Ok(())
     }
 
@@ -139,6 +222,12 @@ impl McpPool {
         let mut names: Vec<String> = guard.http_toolsets.keys().cloned().collect();
         names.push("stdio_manager".into());
         names
+    }
+
+    /// 返回全局 MCP pool 的详细健康状态。
+    pub async fn health_status(&self) -> McpPoolHealth {
+        let guard = self.inner.read().await;
+        McpPoolHealth::from_statuses(guard.statuses.clone())
     }
 }
 
@@ -178,23 +267,42 @@ mod tests {
         assert_eq!(cfg.command, "npx");
         assert_eq!(cfg.args.len(), 3);
         assert_eq!(cfg.env.get("FOO").map(String::as_str), Some("bar"));
-        assert_eq!(cfg.env.get("TMPDIR").map(String::as_str), Some(tmp.to_str().unwrap()));
+        assert_eq!(
+            cfg.env.get("TMPDIR").map(String::as_str),
+            Some(tmp.to_str().unwrap())
+        );
     }
 
     #[test]
     fn sse_record_returns_none_for_stdio_config() {
         let mut rec = sample_stdio_record();
         rec.transport = "sse".into();
-        assert!(record_to_stdio_config(&rec, std::path::Path::new("/tmp"))
-            .expect("ok")
-            .is_none());
+        assert!(
+            record_to_stdio_config(&rec, std::path::Path::new("/tmp"))
+                .expect("ok")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn health_reports_degraded_when_any_server_failed() {
+        let health = McpPoolHealth::from_statuses(vec![
+            McpServerStatus::connected("ok", "stdio"),
+            McpServerStatus::failed("broken", "sse", "connection refused"),
+        ]);
+
+        assert_eq!(health.overall, "degraded");
+        assert_eq!(health.servers.len(), 2);
+        assert_eq!(health.servers[1].name, "broken");
+        assert_eq!(health.servers[1].status, "failed");
+        assert_eq!(
+            health.servers[1].error.as_deref(),
+            Some("connection refused")
+        );
     }
 }
 
-fn merge_tmp_env(
-    env: &mut std::collections::HashMap<String, String>,
-    tmp_dir: &Path,
-) {
+fn merge_tmp_env(env: &mut std::collections::HashMap<String, String>, tmp_dir: &Path) {
     let tmp = tmp_dir.to_string_lossy().to_string();
     env.entry("TMPDIR".into()).or_insert_with(|| tmp.clone());
     env.entry("TEMP".into()).or_insert_with(|| tmp.clone());
@@ -203,7 +311,10 @@ fn merge_tmp_env(
         .or_insert_with(|| tmp_dir.to_string_lossy().to_string());
 }
 
-fn record_to_stdio_config(rec: &McpServerRecord, tmp_dir: &Path) -> MacoResult<Option<McpServerConfig>> {
+fn record_to_stdio_config(
+    rec: &McpServerRecord,
+    tmp_dir: &Path,
+) -> MacoResult<Option<McpServerConfig>> {
     if rec.transport != "stdio" {
         return Ok(None);
     }

@@ -4,9 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use adk_core::{Content, Part, Tool, ToolRegistry, Toolset};
-use adk_skill::{
-    ContextCoordinator, CoordinatorConfig, SkillContext, SkillIndex, ValidationMode,
-};
+use adk_skill::{ContextCoordinator, CoordinatorConfig, SkillContext, SkillIndex, ValidationMode};
 use adk_tool::{LoadArtifactsTool, SimpleToolContext};
 use maco_core::{MacoError, MacoResult};
 use maco_react::ReactTools;
@@ -53,6 +51,10 @@ impl MacoToolRegistry {
 
     pub fn len(&self) -> usize {
         self.tools.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
     }
 }
 

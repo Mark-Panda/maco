@@ -7,14 +7,53 @@ use utoipa::OpenApi;
 /// `GET /health` 响应体。
 #[derive(utoipa::ToSchema, serde::Serialize)]
 pub struct HealthResponse {
-    /// 数据库连通状态。
-    pub db: String,
+    /// `ok` 或 `degraded`。
+    pub overall: String,
+    /// 业务数据库连通状态。
+    pub db: DependencyHealthDoc,
+    /// adk session 数据库连通状态。
+    pub session: DependencyHealthDoc,
+    /// adk memory 数据库连通状态。
+    pub memory: DependencyHealthDoc,
     /// MCP 池状态摘要。
     pub mcp: Vec<String>,
+    /// MCP 详细健康状态。
+    pub mcp_status: McpPoolHealthDoc,
     /// 服务绑定地址。
     pub bind: String,
     /// Agent scratch 临时目录根路径。
     pub tmp_dir: String,
+}
+
+/// 单个依赖的健康状态。
+#[derive(utoipa::ToSchema, serde::Serialize)]
+pub struct DependencyHealthDoc {
+    /// `ok` 或 `failed`。
+    pub status: String,
+    /// 失败原因。
+    pub error: Option<String>,
+}
+
+/// 单个 MCP 服务的运行态状态。
+#[derive(utoipa::ToSchema, serde::Serialize)]
+pub struct McpServerStatusDoc {
+    /// MCP 服务名。
+    pub name: String,
+    /// `stdio` 或 `sse`。
+    pub transport: String,
+    /// `connected` 或 `failed`。
+    pub status: String,
+    /// 失败原因。
+    pub error: Option<String>,
+}
+
+/// MCP pool 聚合健康状态。
+#[derive(utoipa::ToSchema, serde::Serialize)]
+pub struct McpPoolHealthDoc {
+    /// `ok` 或 `degraded`。
+    pub overall: String,
+    /// 各 MCP server 状态。
+    pub servers: Vec<McpServerStatusDoc>,
 }
 
 /// 会话元数据（列表/详情）。
@@ -170,6 +209,124 @@ pub struct RunStatusDoc {
     pub last_seq: u64,
 }
 
+/// Run SSE envelope。`type` 与 `event_type` 语义相同，前端兼容读取两者。
+#[derive(utoipa::ToSchema, serde::Serialize)]
+pub struct SseEnvelopeDoc {
+    /// 事件类型，如 `text` / `tool_call` / `done` / `stream_gap` / `stream_ended` / `stream_unavailable`。
+    pub event_type: String,
+    /// Run ID。
+    pub run_id: String,
+    /// 单 Run 内递增事件序号；客户端可用它检测 replay 缺口与去重。
+    pub seq: u64,
+    /// 事件 payload；普通事件按各自类型解释，replay marker 见 `SseReplayMarkerPayloadDoc`。
+    pub payload: serde_json::Value,
+}
+
+/// SSE replay marker payload，用于 `stream_gap` / `stream_ended` / `stream_unavailable`。
+#[derive(utoipa::ToSchema, serde::Serialize)]
+pub struct SseReplayMarkerPayloadDoc {
+    /// Run 当前或最终状态。`stream_gap` 事件可能为空。
+    pub status: Option<String>,
+    /// Run 已记录的最后 SSE 序号，表示历史上是否存在事件，而不是本次请求一定有新事件。
+    pub last_seq: Option<i64>,
+    /// 本次响应实际回放到的最后序号；为 null 表示没有可回放事件。
+    pub last_replayed_seq: Option<u64>,
+    /// 是否存在已知缺口。客户端应提示用户该 Run 历史可能不完整，并可重新加载会话最终消息。
+    pub gap: bool,
+    /// 该 Run 历史上是否存在可回放事件；不表示本次请求还有未读事件。
+    pub replay_available: Option<bool>,
+    /// Run 是否仍处于可继续运行状态。`stream_unavailable` + `live_stream=true` 表示服务端当前无法接入实时内存流。
+    pub live_stream: Option<bool>,
+    /// `stream_gap` 中回显客户端传入的 `after_seq`。
+    pub after_seq: Option<u64>,
+    /// 面向调试/展示的说明文本。
+    pub message: Option<String>,
+}
+
+/// ReAct 计划记录。
+#[derive(utoipa::ToSchema, serde::Serialize)]
+pub struct PlanDoc {
+    /// 会话 ID。
+    pub session_id: String,
+    /// 计划正文。
+    pub content: String,
+    /// 乐观锁版本号。
+    pub version: i64,
+}
+
+/// 更新 ReAct 计划请求。
+#[derive(utoipa::ToSchema, serde::Deserialize)]
+pub struct PutPlanDoc {
+    /// 计划 Markdown/文本内容。
+    pub content: String,
+    /// 乐观锁版本号。
+    pub version: Option<i64>,
+}
+
+/// Todo 记录。
+#[derive(utoipa::ToSchema, serde::Serialize)]
+pub struct TodoDoc {
+    /// 会话 ID。
+    pub session_id: String,
+    /// 稳定任务 key。
+    pub task_key: String,
+    /// 展示标题。
+    pub title: String,
+    /// 状态。
+    pub status: String,
+}
+
+/// 更新 Todo 状态请求。
+#[derive(utoipa::ToSchema, serde::Deserialize)]
+pub struct PatchTodoDoc {
+    /// 新状态。
+    pub status: String,
+}
+
+/// 子 Agent 执行审计记录。
+#[derive(utoipa::ToSchema, serde::Serialize)]
+pub struct SubAgentRunDoc {
+    /// 记录 ID。
+    pub id: String,
+    /// 会话 ID。
+    pub session_id: String,
+    /// 父 Run ID。
+    pub parent_run_id: String,
+    /// Todo task key。
+    pub task_key: String,
+    /// worker agent 名称。
+    pub worker_agent: String,
+    /// 工具 profile。
+    pub tools_profile: String,
+    /// running / completed / failed / cancelled / timeout。
+    pub status: String,
+    /// 子任务 instruction。
+    pub instruction: String,
+    /// 完成摘要。
+    pub summary: Option<String>,
+    /// 错误信息。
+    pub error: Option<String>,
+}
+
+/// 附件预览响应。
+#[derive(utoipa::ToSchema, serde::Serialize)]
+pub struct ArtifactPreviewDoc {
+    /// 附件 ID。
+    pub id: String,
+    /// 文件名。
+    pub filename: String,
+    /// MIME 类型。
+    pub mime_type: String,
+    /// 是否可预览。
+    pub previewable: bool,
+    /// `image` / `text` / `binary`。
+    pub kind: String,
+    /// 文本预览内容。
+    pub content: Option<String>,
+    /// 是否被截断。
+    pub truncated: bool,
+}
+
 /// HITL 恢复请求体。
 #[derive(utoipa::ToSchema, serde::Deserialize)]
 pub struct ResumeRunDoc {
@@ -237,7 +394,10 @@ pub struct CreateTokenDoc {
     get,
     path = "/api/health",
     tag = "system",
-    responses((status = 200, description = "服务健康检查", body = HealthResponse))
+    responses(
+        (status = 200, description = "服务健康检查通过", body = HealthResponse),
+        (status = 503, description = "服务依赖降级", body = HealthResponse)
+    )
 )]
 fn health_doc() {}
 
@@ -302,6 +462,47 @@ pub struct ChatMessageDoc {
 fn session_messages_doc() {}
 
 #[utoipa::path(
+    get,
+    path = "/api/sessions/{id}/plan",
+    tag = "sessions",
+    params(("id" = String, Path, description = "会话 ID")),
+    responses((status = 200, description = "获取 ReAct 计划", body = PlanDoc))
+)]
+fn get_plan_doc() {}
+
+#[utoipa::path(
+    put,
+    path = "/api/sessions/{id}/plan",
+    tag = "sessions",
+    params(("id" = String, Path, description = "会话 ID")),
+    request_body = PutPlanDoc,
+    responses((status = 200, description = "创建或更新 ReAct 计划", body = PlanDoc))
+)]
+fn put_plan_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/sessions/{id}/todos",
+    tag = "sessions",
+    params(("id" = String, Path, description = "会话 ID")),
+    responses((status = 200, description = "列出 Todo", body = [TodoDoc]))
+)]
+fn list_todos_doc() {}
+
+#[utoipa::path(
+    patch,
+    path = "/api/sessions/{id}/todos/{task_key}",
+    tag = "sessions",
+    params(
+        ("id" = String, Path, description = "会话 ID"),
+        ("task_key" = String, Path, description = "Todo task key"),
+    ),
+    request_body = PatchTodoDoc,
+    responses((status = 200, description = "更新 Todo 状态", body = TodoDoc))
+)]
+fn patch_todo_doc() {}
+
+#[utoipa::path(
     post,
     path = "/api/mcp/servers",
     tag = "mcp",
@@ -317,6 +518,15 @@ fn create_mcp_doc() {}
     responses((status = 200, description = "更新 MCP 服务", body = McpServerDoc))
 )]
 fn update_mcp_doc() {}
+
+#[utoipa::path(
+    delete,
+    path = "/api/mcp/servers/{id}",
+    tag = "mcp",
+    params(("id" = String, Path, description = "MCP 配置 ID")),
+    responses((status = 204, description = "删除 MCP 服务"))
+)]
+fn delete_mcp_doc() {}
 
 #[utoipa::path(
     get,
@@ -355,8 +565,14 @@ fn get_run_doc() {}
     params(
         ("id" = String, Path, description = "会话 ID"),
         ("run_id" = String, Path, description = "Run ID"),
+        ("after_seq" = Option<u64>, Query, description = "已收到的最后 SSE seq；用于短断线回放"),
     ),
-    responses((status = 200, description = "SSE 重连订阅", content_type = "text/event-stream"))
+    responses((
+        status = 200,
+        description = "SSE 重连订阅。除常规 Run 事件外，可能返回 `stream_gap`（历史回放存在缺口）、`stream_ended`（Run 已结束并给出最终 replay 元信息）、`stream_unavailable`（Run 尚未结束但当前实时内存流不可用）。`replay_available` 表示该 Run 历史上存在可回放事件，不表示本次请求一定还有新事件。",
+        body = SseEnvelopeDoc,
+        content_type = "text/event-stream"
+    ))
 )]
 fn stream_run_doc() {}
 
@@ -368,6 +584,40 @@ fn stream_run_doc() {}
     responses((status = 200, description = "HITL 恢复后 SSE 流", content_type = "text/event-stream"))
 )]
 fn resume_run_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/sessions/{id}/sub-agent-runs",
+    tag = "runs",
+    params(("id" = String, Path, description = "会话 ID")),
+    responses((status = 200, description = "子 Agent spawn 审计列表", body = [SubAgentRunDoc]))
+)]
+fn list_sub_agent_runs_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/sessions/{id}/sub-agent-runs/{sub_run_id}",
+    tag = "runs",
+    params(
+        ("id" = String, Path, description = "会话 ID"),
+        ("sub_run_id" = String, Path, description = "子 Agent Run ID"),
+    ),
+    responses((status = 200, description = "子 Agent spawn 审计详情", body = SubAgentRunDoc))
+)]
+fn get_sub_agent_run_doc() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/sessions/{id}/runs/{run_id}/sub-agents/{task_key}/cancel",
+    tag = "runs",
+    params(
+        ("id" = String, Path, description = "会话 ID"),
+        ("run_id" = String, Path, description = "父 Run ID"),
+        ("task_key" = String, Path, description = "子 Agent task key"),
+    ),
+    responses((status = 200, description = "取消活跃子 Agent"))
+)]
+fn cancel_sub_agent_doc() {}
 
 #[utoipa::path(
     get,
@@ -392,7 +642,12 @@ fn respond_elicitation_doc() {}
     path = "/api/chat",
     tag = "chat",
     request_body = ChatRequestDoc,
-    responses((status = 200, description = "SSE 流式返回 SseEnvelope 事件"))
+    responses((
+        status = 200,
+        description = "SSE 流式返回 `SseEnvelope` 事件；断线重连语义同 Run stream endpoint。",
+        body = SseEnvelopeDoc,
+        content_type = "text/event-stream"
+    ))
 )]
 fn chat_doc() {}
 
@@ -421,6 +676,25 @@ fn list_models_doc() {}
     responses((status = 200, description = "创建模型", body = ModelViewDoc))
 )]
 fn create_model_doc() {}
+
+#[utoipa::path(
+    patch,
+    path = "/api/models/{id}",
+    tag = "models",
+    params(("id" = String, Path, description = "模型配置 ID")),
+    request_body = ModelUpsertDoc,
+    responses((status = 200, description = "更新模型", body = ModelViewDoc))
+)]
+fn update_model_doc() {}
+
+#[utoipa::path(
+    delete,
+    path = "/api/models/{id}",
+    tag = "models",
+    params(("id" = String, Path, description = "模型配置 ID")),
+    responses((status = 204, description = "删除模型"))
+)]
+fn delete_model_doc() {}
 
 #[utoipa::path(
     get,
@@ -513,6 +787,27 @@ fn get_skill_doc() {}
 )]
 fn list_artifacts_doc() {}
 
+#[utoipa::path(
+    post,
+    path = "/api/sessions/{id}/artifacts",
+    tag = "sessions",
+    params(("id" = String, Path, description = "会话 ID")),
+    responses((status = 200, description = "上传附件", body = ArtifactDoc))
+)]
+fn upload_artifact_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/sessions/{id}/artifacts/{artifact_id}/preview",
+    tag = "sessions",
+    params(
+        ("id" = String, Path, description = "会话 ID"),
+        ("artifact_id" = String, Path, description = "附件 ID"),
+    ),
+    responses((status = 200, description = "附件预览", body = ArtifactPreviewDoc))
+)]
+fn preview_artifact_doc() {}
+
 /// HITL 工具策略。
 #[derive(utoipa::ToSchema, serde::Serialize)]
 pub struct ToolPolicyDoc {
@@ -528,6 +823,19 @@ pub struct ToolPolicyDoc {
     pub enabled: i64,
 }
 
+/// 工具策略创建/更新请求。
+#[derive(utoipa::ToSchema, serde::Deserialize)]
+pub struct ToolPolicyUpsertDoc {
+    /// 工具名匹配模式。
+    pub tool_pattern: String,
+    /// 来源：`tool` / `mcp` / `builtin`。
+    pub source_type: String,
+    /// `allow` / `confirm` / `deny`。
+    pub action: String,
+    /// 是否启用。
+    pub enabled: Option<bool>,
+}
+
 #[utoipa::path(
     get,
     path = "/api/tool-policies",
@@ -535,6 +843,42 @@ pub struct ToolPolicyDoc {
     responses((status = 200, description = "工具策略列表", body = [ToolPolicyDoc]))
 )]
 fn list_tool_policies_doc() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/tool-policies",
+    tag = "governance",
+    request_body = ToolPolicyUpsertDoc,
+    responses((status = 200, description = "创建工具策略", body = ToolPolicyDoc))
+)]
+fn create_tool_policy_doc() {}
+
+#[utoipa::path(
+    patch,
+    path = "/api/tool-policies/{id}",
+    tag = "governance",
+    params(("id" = String, Path, description = "工具策略 ID")),
+    request_body = ToolPolicyUpsertDoc,
+    responses((status = 200, description = "更新工具策略", body = ToolPolicyDoc))
+)]
+fn update_tool_policy_doc() {}
+
+#[utoipa::path(
+    delete,
+    path = "/api/tool-policies/{id}",
+    tag = "governance",
+    params(("id" = String, Path, description = "工具策略 ID")),
+    responses((status = 204, description = "删除工具策略"))
+)]
+fn delete_tool_policy_doc() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/tool-policies/reload",
+    tag = "governance",
+    responses((status = 200, description = "从 DB 重载工具策略到 Harness"))
+)]
+fn reload_tool_policies_doc() {}
 
 #[utoipa::path(
     get,
@@ -606,21 +950,31 @@ fn list_tokens_doc() {}
         create_session_doc,
         export_session_doc,
         session_messages_doc,
+        get_plan_doc,
+        put_plan_doc,
+        list_todos_doc,
+        patch_todo_doc,
         active_run_doc,
         provision_worktree_doc,
         get_run_doc,
         stream_run_doc,
         resume_run_doc,
+        list_sub_agent_runs_doc,
+        get_sub_agent_run_doc,
+        cancel_sub_agent_doc,
         list_elicitation_doc,
         respond_elicitation_doc,
         chat_doc,
         interrupt_chat_doc,
         list_models_doc,
         create_model_doc,
+        update_model_doc,
+        delete_model_doc,
         memory_search_doc,
         list_mcp_doc,
         create_mcp_doc,
         update_mcp_doc,
+        delete_mcp_doc,
         reload_mcp_doc,
         list_jobs_doc,
         create_token_doc,
@@ -628,13 +982,22 @@ fn list_tokens_doc() {}
         list_skills_doc,
         get_skill_doc,
         list_artifacts_doc,
+        upload_artifact_doc,
+        preview_artifact_doc,
         download_artifact_doc,
         list_tool_policies_doc,
+        create_tool_policy_doc,
+        update_tool_policy_doc,
+        delete_tool_policy_doc,
+        reload_tool_policies_doc,
         get_worktree_path_guard_doc,
         update_worktree_path_guard_doc,
     ),
     components(schemas(
         HealthResponse,
+        DependencyHealthDoc,
+        McpServerStatusDoc,
+        McpPoolHealthDoc,
         SessionMetaDoc,
         CreateSessionDoc,
         ChatRequestDoc,
@@ -646,6 +1009,13 @@ fn list_tokens_doc() {}
         ActiveRunDoc,
         PickDirectoryDoc,
         RunStatusDoc,
+        SseEnvelopeDoc,
+        SseReplayMarkerPayloadDoc,
+        PlanDoc,
+        PutPlanDoc,
+        TodoDoc,
+        PatchTodoDoc,
+        SubAgentRunDoc,
         ResumeRunDoc,
         ElicitationRespondDoc,
         McpServerDoc,
@@ -655,7 +1025,9 @@ fn list_tokens_doc() {}
         SkillSummaryDoc,
         SkillDetailDoc,
         ArtifactDoc,
+        ArtifactPreviewDoc,
         ToolPolicyDoc,
+        ToolPolicyUpsertDoc,
     )),
     tags(
         (name = "system", description = "健康检查与治理"),

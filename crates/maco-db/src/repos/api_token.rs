@@ -55,11 +55,10 @@ impl ApiTokenRepo {
     }
 
     pub async fn count_enabled(&self) -> MacoResult<i64> {
-        let row: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM maco_api_tokens WHERE enabled = 1")
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|e| MacoError::database(e.to_string()))?;
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM maco_api_tokens WHERE enabled = 1")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| MacoError::database(e.to_string()))?;
         Ok(row.0)
     }
 

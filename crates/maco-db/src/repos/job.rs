@@ -47,12 +47,10 @@ impl JobRepo {
     }
 
     pub async fn list(&self) -> MacoResult<Vec<JobRecord>> {
-        sqlx::query_as::<_, JobRecord>(
-            "SELECT * FROM maco_jobs ORDER BY created_at DESC",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| MacoError::database(e.to_string()))
+        sqlx::query_as::<_, JobRecord>("SELECT * FROM maco_jobs ORDER BY created_at DESC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| MacoError::database(e.to_string()))
     }
 
     pub async fn get(&self, id: &str) -> MacoResult<Option<JobRecord>> {

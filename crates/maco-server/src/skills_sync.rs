@@ -40,11 +40,7 @@ pub async fn sync_skills(
 
     for doc in index.skills() {
         skills
-            .upsert_from_scan(
-                &doc.name,
-                &doc.description,
-                &doc.path.display().to_string(),
-            )
+            .upsert_from_scan(&doc.name, &doc.description, &doc.path.display().to_string())
             .await?;
     }
     skills.delete_not_in(&names).await?;
@@ -64,7 +60,10 @@ pub async fn reload_disabled(skills: &SkillRepo, manager: &AdkSkillManager) -> M
     Ok(())
 }
 
-pub fn summaries_from_index(index: &maco_harness::SkillIndex, manager: &AdkSkillManager) -> Vec<SkillSummary> {
+pub fn summaries_from_index(
+    index: &maco_harness::SkillIndex,
+    manager: &AdkSkillManager,
+) -> Vec<SkillSummary> {
     index
         .skills()
         .iter()
@@ -73,9 +72,9 @@ pub fn summaries_from_index(index: &maco_harness::SkillIndex, manager: &AdkSkill
 }
 
 pub fn doc_to_summary(doc: &SkillDocument, enabled: bool) -> SkillSummary {
-    let updated_at = doc.last_modified.and_then(|secs| {
-        chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.to_rfc3339())
-    });
+    let updated_at = doc
+        .last_modified
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.to_rfc3339()));
     SkillSummary {
         name: doc.name.clone(),
         description: doc.description.clone(),

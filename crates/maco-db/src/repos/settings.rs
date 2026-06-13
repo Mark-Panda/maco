@@ -33,6 +33,14 @@ impl SettingsRepo {
         Self { pool }
     }
 
+    pub async fn ping(&self) -> MacoResult<()> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| MacoError::database(e.to_string()))?;
+        Ok(())
+    }
+
     pub async fn get(&self, key: &str) -> MacoResult<Option<String>> {
         let row: Option<(String,)> =
             sqlx::query_as("SELECT value FROM maco_app_settings WHERE key = ?")

@@ -4,13 +4,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use adk_core::{Content, FunctionResponseData, Part};
 use adk_core::Result as AdkResult;
-use maco_core::{ResumeContext, SseEnvelope, RUN_STATUS_AWAITING_USER};
-use maco_db::ToolPolicyRecord;
+use adk_core::{Content, FunctionResponseData, Part};
 use maco_core::AgentPermissionMode;
-use maco_governance::{resolve_action_with_mode, PolicyAction};
-use tokio::sync::{mpsc, Mutex, oneshot};
+use maco_core::{RUN_STATUS_AWAITING_USER, ResumeContext, SseEnvelope};
+use maco_db::ToolPolicyRecord;
+use maco_governance::{PolicyAction, resolve_action_with_mode};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::orchestrator::RunOrchestrator;
 use crate::run_stream::RunStreamRegistry;
@@ -32,10 +32,7 @@ impl HitlBroker {
     /// 为 Run 注册等待通道，返回接收端。
     pub async fn register(&self, run_id: &str) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        self.inner
-            .lock()
-            .await
-            .insert(run_id.to_string(), tx);
+        self.inner.lock().await.insert(run_id.to_string(), tx);
         rx
     }
 

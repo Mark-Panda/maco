@@ -4,4 +4,4 @@ pub mod callback_logger;
 pub mod tracing_init;
 
 pub use callback_logger::MacoCallbackLogger;
-pub use tracing_init::{init_maco_tracing, TelemetryInit};
+pub use tracing_init::{TelemetryInit, init_maco_tracing};

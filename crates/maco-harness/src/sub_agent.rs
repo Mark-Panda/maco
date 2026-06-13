@@ -3,10 +3,15 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::callbacks::{after_tool, agent_guardrails, before_tool_with_hitl};
+use crate::hitl::HitlGate;
+use crate::orchestrator::RunOrchestrator;
+use crate::run_stream::RunStreamRegistry;
+use crate::usage::UsageContext;
 use adk_agent::LlmAgentBuilder;
 use adk_core::{
     AdkError, Content, Event, InvocationContext as InvocationContextTrait, Part,
@@ -17,17 +22,12 @@ use adk_session::{GetRequest, SessionService};
 use adk_tool::LoadArtifactsTool;
 use async_trait::async_trait;
 use futures::StreamExt;
-use maco_core::{MacoError, MacoResult, SessionWorkspace, SseEnvelope, APP_NAME, USER_ID};
+use maco_core::{APP_NAME, MacoError, MacoResult, SessionWorkspace, SseEnvelope, USER_ID};
 use maco_db::{ReactRepo, SubAgentRunRepo};
 use maco_storage::adk_artifacts_enabled;
 use maco_telemetry::MacoCallbackLogger;
-use serde_json::{json, Value};
-use tokio::sync::{mpsc, Mutex};
-use crate::callbacks::{after_tool, agent_guardrails, before_tool_with_hitl};
-use crate::hitl::HitlGate;
-use crate::orchestrator::RunOrchestrator;
-use crate::run_stream::RunStreamRegistry;
-use crate::usage::UsageContext;
+use serde_json::{Value, json};
+use tokio::sync::{Mutex, mpsc};
 
 const DEFAULT_MAX_SPAWNS: usize = 20;
 const DEFAULT_MAX_ITERATIONS: u32 = 50;
@@ -99,7 +99,7 @@ fn max_sub_iterations() -> u32 {
     env::var("MACO_SUB_AGENT_MAX_ITERATIONS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_MAX_ITERATIONS as u32)
+        .unwrap_or(DEFAULT_MAX_ITERATIONS)
 }
 
 fn sub_agent_timeout() -> Duration {
@@ -132,6 +132,31 @@ impl ToolsProfile {
             Self::Readonly => "readonly",
             Self::Full => "full",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkerToolPlan {
+    include_bash: bool,
+    include_mcp_toolsets: bool,
+    include_artifact_loader: bool,
+}
+
+fn worker_tool_plan(profile: ToolsProfile, artifacts_enabled: bool) -> WorkerToolPlan {
+    match profile {
+        // Readonly intentionally excludes bash and MCP toolsets. MCP servers can
+        // expose write-capable tools, so this profile only keeps built-in read
+        // surfaces such as artifact loading.
+        ToolsProfile::Readonly => WorkerToolPlan {
+            include_bash: false,
+            include_mcp_toolsets: false,
+            include_artifact_loader: artifacts_enabled,
+        },
+        ToolsProfile::Coding | ToolsProfile::Full => WorkerToolPlan {
+            include_bash: true,
+            include_mcp_toolsets: true,
+            include_artifact_loader: artifacts_enabled,
+        },
     }
 }
 
@@ -188,6 +213,12 @@ impl SubAgentParentBridge {
             }
             ms.append_event(event.clone());
         }
+    }
+}
+
+impl Default for SubAgentParentBridge {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -268,11 +299,7 @@ impl SubAgentCoordinator {
     }
 
     /// 取消指定 task_key 的活跃 spawn；返回 `(task_key, record_id)`。
-    pub async fn cancel(
-        &self,
-        parent_run_id: &str,
-        task_key: &str,
-    ) -> Option<(String, String)> {
+    pub async fn cancel(&self, parent_run_id: &str, task_key: &str) -> Option<(String, String)> {
         let map = self.active.lock().await;
         let entry = map.get(parent_run_id);
         if entry.map(|e| e.task_key == task_key).unwrap_or(false) {
@@ -326,6 +353,7 @@ struct SubAgentRunContextInner {
 }
 
 impl SubAgentRunContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: String,
         run_id: String,
@@ -380,9 +408,7 @@ impl SubAgentRunContext {
     }
 
     pub fn spawn_tool(&self) -> Arc<dyn Tool> {
-        Arc::new(SpawnSubAgentTool {
-            ctx: self.clone(),
-        })
+        Arc::new(SpawnSubAgentTool { ctx: self.clone() })
     }
 }
 
@@ -515,7 +541,13 @@ impl SpawnSubAgentTool {
             .unwrap_or(task_key);
         inner
             .react
-            .upsert_todo(session_id, task_key, todo_title, sort_order, Some("in_progress"))
+            .upsert_todo(
+                session_id,
+                task_key,
+                todo_title,
+                sort_order,
+                Some("in_progress"),
+            )
             .await
             .map_err(|e| MacoError::database(e.to_string()))?;
 
@@ -657,7 +689,13 @@ impl SpawnSubAgentTool {
         if outcome.status == "completed" {
             inner
                 .react
-                .upsert_todo(session_id, task_key, todo_title, sort_order, Some("completed"))
+                .upsert_todo(
+                    session_id,
+                    task_key,
+                    todo_title,
+                    sort_order,
+                    Some("completed"),
+                )
                 .await
                 .map_err(|e| MacoError::database(e.to_string()))?;
         }
@@ -753,13 +791,37 @@ async fn run_worker_stream(
         }
     }
 
+    Ok(worker_outcome_after_stream_end(
+        cancelled_flag.load(Ordering::Relaxed),
+        failed,
+        fail_msg,
+        last_summary,
+        artifacts,
+    ))
+}
+
+fn worker_outcome_after_stream_end(
+    cancelled: bool,
+    failed: bool,
+    fail_msg: Option<String>,
+    last_summary: String,
+    artifacts: Vec<String>,
+) -> WorkerOutcome {
+    if cancelled {
+        return WorkerOutcome {
+            status: "cancelled".into(),
+            summary: None,
+            artifacts,
+            error: Some("cancelled".into()),
+        };
+    }
     if failed {
-        return Ok(WorkerOutcome {
+        return WorkerOutcome {
             status: "failed".into(),
             summary: None,
             artifacts,
             error: fail_msg,
-        });
+        };
     }
 
     let summary = if last_summary.is_empty() {
@@ -768,12 +830,12 @@ async fn run_worker_stream(
         last_summary
     };
 
-    Ok(WorkerOutcome {
+    WorkerOutcome {
         status: "completed".into(),
         summary: Some(summary),
         artifacts,
         error: None,
-    })
+    }
 }
 
 fn build_sub_instruction(
@@ -817,9 +879,10 @@ fn build_worker_agent(
         .before_callback(crate::callbacks::before_agent(Arc::clone(&logger)))
         .after_callback(crate::callbacks::after_agent(Arc::clone(&logger)))
         .before_model_callback(crate::callbacks::before_model(Arc::clone(&logger)))
-        .after_model_callback(
-            crate::callbacks::after_model(Arc::clone(&logger), inner.usage.clone()),
-        )
+        .after_model_callback(crate::callbacks::after_model(
+            Arc::clone(&logger),
+            inner.usage.clone(),
+        ))
         .before_tool_callback(before_tool_with_hitl(
             Arc::clone(&logger),
             hitl,
@@ -828,26 +891,20 @@ fn build_worker_agent(
         ))
         .after_tool_callback(after_tool(Arc::clone(&logger)));
 
-    match profile {
-        ToolsProfile::Readonly => {
-            for ts in &inner.mcp_toolsets {
-                builder = builder.toolset(Arc::clone(ts));
-            }
-        }
-        ToolsProfile::Coding | ToolsProfile::Full => {
-            builder = builder.tool(Arc::clone(&inner.bash_tool));
-            for ts in &inner.mcp_toolsets {
-                builder = builder.toolset(Arc::clone(ts));
-            }
-            if adk_artifacts_enabled() {
-                builder = builder.tool(Arc::new(LoadArtifactsTool::new()));
-            }
+    let tool_plan = worker_tool_plan(profile, adk_artifacts_enabled());
+    if tool_plan.include_bash {
+        builder = builder.tool(Arc::clone(&inner.bash_tool));
+    }
+    if tool_plan.include_mcp_toolsets {
+        for ts in &inner.mcp_toolsets {
+            builder = builder.toolset(Arc::clone(ts));
         }
     }
+    if tool_plan.include_artifact_loader {
+        builder = builder.tool(Arc::new(LoadArtifactsTool::new()));
+    }
 
-    let agent = builder
-        .build()
-        .map_err(|e| MacoError::Adk(e.to_string()))?;
+    let agent = builder.build().map_err(|e| MacoError::Adk(e.to_string()))?;
     Ok(Arc::new(agent))
 }
 
@@ -867,7 +924,11 @@ async fn publish_sub_agent_progress(
     content: &str,
     phase: &str,
 ) {
-    let seq = inner.orchestrator.next_seq(&inner.run_id).await.unwrap_or(0);
+    let seq = inner
+        .orchestrator
+        .next_seq(&inner.run_id)
+        .await
+        .unwrap_or(0);
     let env = SseEnvelope {
         event_type: "sub_agent_progress".into(),
         run_id: inner.run_id.clone(),
@@ -883,12 +944,12 @@ async fn publish_sub_agent_progress(
     inner.streams.publish(&inner.session_id, env).await;
 }
 
-async fn publish_sub_tool_call(
-    inner: &SubAgentRunContextInner,
-    task_key: &str,
-    tool_ev: &Value,
-) {
-    let seq = inner.orchestrator.next_seq(&inner.run_id).await.unwrap_or(0);
+async fn publish_sub_tool_call(inner: &SubAgentRunContextInner, task_key: &str, tool_ev: &Value) {
+    let seq = inner
+        .orchestrator
+        .next_seq(&inner.run_id)
+        .await
+        .unwrap_or(0);
     let payload = json!({
         "name": tool_ev.get("name"),
         "args": tool_ev.get("args"),
@@ -917,21 +978,34 @@ pub async fn emit_sub_agent_cancelled(
     reason: &str,
 ) {
     let seq = orchestrator.next_seq(run_id).await.unwrap_or(0);
-    let env = SseEnvelope {
+    let env = sub_agent_cancelled_envelope(run_id, seq, task_key, reason);
+    streams.publish(session_id, env).await;
+}
+
+fn sub_agent_cancelled_envelope(
+    run_id: &str,
+    seq: u64,
+    task_key: &str,
+    reason: &str,
+) -> SseEnvelope {
+    SseEnvelope {
         event_type: "sub_agent_cancelled".into(),
         run_id: run_id.to_string(),
         seq,
         payload: json!({
             "task_key": task_key,
             "reason": reason,
+            "status": "cancelled",
         }),
-    };
-    streams.publish(session_id, env).await;
+    }
 }
 
 fn extract_event_text(event: &Event) -> Option<String> {
     event.llm_response.content.as_ref().and_then(|c| {
-        if c.parts.iter().any(|p| matches!(p, Part::FunctionCall { .. })) {
+        if c.parts
+            .iter()
+            .any(|p| matches!(p, Part::FunctionCall { .. }))
+        {
             return None;
         }
         let text = c
@@ -943,11 +1017,7 @@ fn extract_event_text(event: &Event) -> Option<String> {
             })
             .collect::<Vec<_>>()
             .join("");
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
+        if text.is_empty() { None } else { Some(text) }
     })
 }
 
@@ -989,8 +1059,47 @@ mod tests {
 
     #[test]
     fn tools_profile_parse() {
-        assert_eq!(ToolsProfile::parse(Some("readonly")), ToolsProfile::Readonly);
+        assert_eq!(
+            ToolsProfile::parse(Some("readonly")),
+            ToolsProfile::Readonly
+        );
         assert_eq!(ToolsProfile::parse(Some("full")), ToolsProfile::Full);
         assert_eq!(ToolsProfile::parse(None), ToolsProfile::Coding);
+    }
+
+    #[test]
+    fn readonly_profile_excludes_bash_and_mcp_toolsets() {
+        let plan = worker_tool_plan(ToolsProfile::Readonly, true);
+
+        assert!(!plan.include_bash);
+        assert!(!plan.include_mcp_toolsets);
+        assert!(plan.include_artifact_loader);
+    }
+
+    #[test]
+    fn coding_profile_keeps_bash_and_mcp_toolsets() {
+        let plan = worker_tool_plan(ToolsProfile::Coding, true);
+
+        assert!(plan.include_bash);
+        assert!(plan.include_mcp_toolsets);
+        assert!(plan.include_artifact_loader);
+    }
+
+    #[test]
+    fn cancelled_envelope_includes_cancelled_status() {
+        let env = sub_agent_cancelled_envelope("run-1", 7, "task-1", "manual");
+
+        assert_eq!(env.event_type, "sub_agent_cancelled");
+        assert_eq!(env.payload["task_key"], "task-1");
+        assert_eq!(env.payload["reason"], "manual");
+        assert_eq!(env.payload["status"], "cancelled");
+    }
+
+    #[test]
+    fn worker_outcome_prefers_cancelled_after_stream_end() {
+        let outcome = worker_outcome_after_stream_end(true, false, None, String::new(), Vec::new());
+
+        assert_eq!(outcome.status, "cancelled");
+        assert_eq!(outcome.error.as_deref(), Some("cancelled"));
     }
 }

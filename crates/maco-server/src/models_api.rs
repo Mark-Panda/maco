@@ -2,7 +2,8 @@
 
 use chrono::Utc;
 use maco_core::{
-    api_key_preview, has_stored_api_key, merge_api_key, redact_config_for_api, MacoError, MacoResult,
+    MacoError, MacoResult, api_key_preview, has_stored_api_key, merge_api_key,
+    redact_config_for_api,
 };
 use maco_db::{ModelRecord, ModelRepo};
 use maco_harness::validate_provider;
@@ -73,7 +74,11 @@ fn default_enabled() -> bool {
 }
 
 /// MiniMax 走 Anthropic 兼容协议，不能使用官方 `api.anthropic.com`。
-fn validate_minimax_endpoint(provider: &str, model_id: &str, base_url: Option<&str>) -> MacoResult<()> {
+fn validate_minimax_endpoint(
+    provider: &str,
+    model_id: &str,
+    base_url: Option<&str>,
+) -> MacoResult<()> {
     if provider != "anthropic" {
         return Ok(());
     }
@@ -105,8 +110,7 @@ impl ModelView {
             is_default: rec.is_default == 1,
             enabled: rec.enabled == 1,
             config: redact_config_for_api(&rec.config),
-            has_api_key: has_stored_api_key(&rec.config)
-                || (!rec.api_key_env.trim().is_empty()),
+            has_api_key: has_stored_api_key(&rec.config) || (!rec.api_key_env.trim().is_empty()),
             api_key_preview: api_key_preview(&rec.config),
             created_at: rec.created_at.clone(),
             updated_at: rec.updated_at.clone(),
@@ -139,9 +143,7 @@ pub async fn upsert_from_body(
         None
     };
 
-    let model_id = id
-        .map(str::to_string)
-        .unwrap_or_else(ModelRepo::new_id);
+    let model_id = id.map(str::to_string).unwrap_or_else(ModelRepo::new_id);
 
     let base_config = body
         .config
@@ -149,11 +151,7 @@ pub async fn upsert_from_body(
         .or_else(|| existing.as_ref().map(|e| e.config.as_str()))
         .unwrap_or("{}");
 
-    let api_key_input = match body.api_key.as_deref() {
-        Some("") => Some(""), // clear stored key
-        Some(key) => Some(key),
-        None => None,         // keep existing
-    };
+    let api_key_input = body.api_key.as_deref();
 
     let merged_config = if api_key_input.is_some() {
         merge_api_key(base_config, api_key_input)?
@@ -186,7 +184,12 @@ pub async fn upsert_from_body(
         base_url,
         api_key_env: body
             .api_key_env
-            .unwrap_or_else(|| existing.as_ref().map(|e| e.api_key_env.clone()).unwrap_or_default())
+            .unwrap_or_else(|| {
+                existing
+                    .as_ref()
+                    .map(|e| e.api_key_env.clone())
+                    .unwrap_or_default()
+            })
             .trim()
             .to_string(),
         is_default: if body.is_default { 1 } else { 0 },

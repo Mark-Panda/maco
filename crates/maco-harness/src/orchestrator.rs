@@ -96,7 +96,11 @@ impl RunOrchestrator {
     }
 
     /// HITL 续跑：结束父 Run，创建新的子 Run 并置为 `running`。
-    pub async fn start_resumed_run(&self, session_id: &str, parent_run_id: &str) -> MacoResult<RunRecord> {
+    pub async fn start_resumed_run(
+        &self,
+        session_id: &str,
+        parent_run_id: &str,
+    ) -> MacoResult<RunRecord> {
         let lock = self.lock_for(session_id).await;
         let _guard = lock.lock().await;
         if self.runs.has_running(session_id).await? {

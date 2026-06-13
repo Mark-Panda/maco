@@ -3,11 +3,11 @@
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 
-use maco_core::{default_skills_dir, MacoError, MacoResult};
+use maco_core::{MacoError, MacoResult, default_skills_dir};
 use uuid::Uuid;
 use zip::ZipArchive;
 
-use adk_skill::{load_skill_index_with_extras, parse_skill_markdown, SkillDocument};
+use adk_skill::{SkillDocument, load_skill_index_with_extras, parse_skill_markdown};
 
 /// Skill zip 包最大体积（20 MB）。
 pub const MAX_SKILL_ZIP_BYTES: usize = 20 * 1024 * 1024;
@@ -24,7 +24,11 @@ pub struct SkillInstallResult {
 }
 
 /// 将 zip 解压并安装到 skills 目录。
-pub fn install_skill_zip(bytes: &[u8], zip_filename: &str, overwrite: bool) -> MacoResult<SkillInstallResult> {
+pub fn install_skill_zip(
+    bytes: &[u8],
+    zip_filename: &str,
+    overwrite: bool,
+) -> MacoResult<SkillInstallResult> {
     if bytes.is_empty() {
         return Err(MacoError::config("empty zip file"));
     }
@@ -72,14 +76,12 @@ pub fn install_skill_zip(bytes: &[u8], zip_filename: &str, overwrite: bool) -> M
     }
 
     if content_root == temp_dir {
-        std::fs::rename(&temp_dir, &target_dir).map_err(|e| {
-            MacoError::config(format!("install skill dir: {e}"))
-        })?;
+        std::fs::rename(&temp_dir, &target_dir)
+            .map_err(|e| MacoError::config(format!("install skill dir: {e}")))?;
         std::mem::forget(cleanup);
     } else {
-        std::fs::rename(&content_root, &target_dir).map_err(|e| {
-            MacoError::config(format!("install skill dir: {e}"))
-        })?;
+        std::fs::rename(&content_root, &target_dir)
+            .map_err(|e| MacoError::config(format!("install skill dir: {e}")))?;
     }
 
     let skill = find_skill_by_name(&install_name).ok_or_else(|| {
@@ -100,7 +102,9 @@ pub fn delete_skill(name: &str) -> MacoResult<()> {
     let skills_dir = default_skills_dir();
     let target = skill_deletion_path(&skill.path, &skills_dir);
     if !path_within(&target, &skills_dir) {
-        return Err(MacoError::config("refusing to delete path outside skills dir"));
+        return Err(MacoError::config(
+            "refusing to delete path outside skills dir",
+        ));
     }
     if !target.exists() {
         return Err(MacoError::not_found("skill"));
@@ -110,7 +114,8 @@ pub fn delete_skill(name: &str) -> MacoResult<()> {
 
 fn find_skill_by_name(name: &str) -> Option<SkillDocument> {
     let skills_dir = default_skills_dir();
-    let index = load_skill_index_with_extras(&skills_dir, &[skills_dir.clone()]).ok()?;
+    let index =
+        load_skill_index_with_extras(&skills_dir, std::slice::from_ref(&skills_dir)).ok()?;
     index.find_by_name(name).cloned()
 }
 
@@ -186,9 +191,9 @@ fn extract_zip_secure(bytes: &[u8], dest: &Path) -> MacoResult<usize> {
 
 fn is_safe_relative_path(path: &Path) -> bool {
     !path.is_absolute()
-        && path.components().all(|c| {
-            matches!(c, Component::Normal(_) | Component::CurDir)
-        })
+        && path
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
 fn should_ignore_zip_path(path: &Path) -> bool {
@@ -222,20 +227,22 @@ fn resolve_content_root(temp_dir: &Path) -> MacoResult<PathBuf> {
     }
 }
 
-fn resolve_install_name(content_root: &Path, temp_dir: &Path, zip_stem: &str) -> MacoResult<String> {
-    if let Some(skill_md) = find_primary_skill_md(content_root) {
-        if let Ok(raw) = std::fs::read_to_string(&skill_md) {
-            if let Ok(parsed) = parse_skill_markdown(&skill_md, &raw) {
-                return Ok(parsed.name);
-            }
-        }
+fn resolve_install_name(
+    content_root: &Path,
+    temp_dir: &Path,
+    zip_stem: &str,
+) -> MacoResult<String> {
+    if let Some(skill_md) = find_primary_skill_md(content_root)
+        && let Ok(raw) = std::fs::read_to_string(&skill_md)
+        && let Ok(parsed) = parse_skill_markdown(&skill_md, &raw)
+    {
+        return Ok(parsed.name);
     }
-    if content_root != temp_dir {
-        if let Some(name) = content_root.file_name().and_then(|s| s.to_str()) {
-            if !name.is_empty() {
-                return Ok(name.to_string());
-            }
-        }
+    if content_root != temp_dir
+        && let Some(name) = content_root.file_name().and_then(|s| s.to_str())
+        && !name.is_empty()
+    {
+        return Ok(name.to_string());
     }
     Ok(zip_stem.to_string())
 }
@@ -263,11 +270,7 @@ fn list_visible_entries(dir: &Path) -> MacoResult<Vec<std::fs::DirEntry>> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| MacoError::config(format!("read dir: {e}")))?
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .is_some_and(|n| !n.starts_with('.'))
-        })
+        .filter(|e| e.file_name().to_str().is_some_and(|n| !n.starts_with('.')))
         .collect();
     entries.sort_by_key(|e| e.file_name());
     Ok(entries)
@@ -290,7 +293,9 @@ fn path_within(path: &Path, root: &Path) -> bool {
 
 fn remove_path_secure(path: &Path, skills_dir: &Path) -> MacoResult<()> {
     if !path_within(path, skills_dir) {
-        return Err(MacoError::config("refusing to delete path outside skills dir"));
+        return Err(MacoError::config(
+            "refusing to delete path outside skills dir",
+        ));
     }
     if path.is_dir() {
         std::fs::remove_dir_all(path).map_err(|e| MacoError::config(format!("remove dir: {e}")))?;
@@ -305,8 +310,8 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     fn write_zip(entries: &[(&str, &str)]) -> Vec<u8> {
         let mut buf = Vec::new();

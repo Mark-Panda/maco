@@ -6,7 +6,7 @@ use std::path::PathBuf;
 pub fn pick_directory_blocking() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        return pick_directory_macos();
+        pick_directory_macos()
     }
     #[cfg(all(not(target_os = "macos"), feature = "native-dialog"))]
     {

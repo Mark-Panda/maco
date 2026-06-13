@@ -4,12 +4,12 @@ use std::env;
 use std::sync::{Arc, Mutex};
 
 use adk_rust::prelude::*;
-use maco_core::{api_key_from_config, MacoError, MacoResult};
+use maco_core::{MacoError, MacoResult, api_key_from_config};
 use maco_db::ModelRecord;
 use serde_json::Value;
 use tracing::info;
 
-use crate::force_unary_llm::{should_force_unary_http, ForceUnaryLlm};
+use crate::force_unary_llm::{ForceUnaryLlm, should_force_unary_http};
 
 /// ADK 默认仅 4096，工具调用 JSON 易被截断；maco 统一使用较大默认值。
 pub const DEFAULT_MAX_TOKENS: u32 = 32_768;
@@ -211,12 +211,13 @@ pub fn build_llm_for_run(
     log_llm_dispatch(model, &api_key, &key_source, session_id, run_id);
     match model.provider.as_str() {
         "openai" => {
-            let client = if let Some(base) = model.base_url.as_ref().filter(|b| !b.trim().is_empty()) {
-                OpenAIClient::new(OpenAIConfig::compatible(api_key, base, &model.model_id))
-            } else {
-                OpenAIClient::new(OpenAIConfig::new(api_key, &model.model_id))
-            }
-            .map_err(|e| MacoError::Adk(e.to_string()))?;
+            let client =
+                if let Some(base) = model.base_url.as_ref().filter(|b| !b.trim().is_empty()) {
+                    OpenAIClient::new(OpenAIConfig::compatible(api_key, base, &model.model_id))
+                } else {
+                    OpenAIClient::new(OpenAIConfig::new(api_key, &model.model_id))
+                }
+                .map_err(|e| MacoError::Adk(e.to_string()))?;
             Ok(finalize_llm(Arc::new(client) as Arc<dyn Llm>, model))
         }
         "anthropic" => {
@@ -250,7 +251,6 @@ pub fn build_llm_for_run(
 
 #[cfg(test)]
 mod force_unary_tests {
-    use super::*;
     use crate::force_unary_llm::should_force_unary_http;
 
     #[test]

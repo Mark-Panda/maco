@@ -50,9 +50,8 @@ pub fn before_model(logger: Arc<MacoCallbackLogger>) -> BeforeModelCallback {
     Box::new(move |ctx, request| {
         let logger = Arc::clone(&logger);
         Box::pin(async move {
-            let input = prepare_log_payload(
-                &serde_json::to_value(&request.contents).unwrap_or_default(),
-            );
+            let input =
+                prepare_log_payload(&serde_json::to_value(&request.contents).unwrap_or_default());
             logger
                 .log_phase("before_model", ctx.session_id(), Some(&input), None)
                 .await;
@@ -71,9 +70,7 @@ pub fn after_model(
         let usage = usage.clone();
         let resp = response.clone();
         Box::pin(async move {
-            let output = prepare_log_payload(
-                &serde_json::to_value(&resp).unwrap_or_default(),
-            );
+            let output = prepare_log_payload(&serde_json::to_value(&resp).unwrap_or_default());
             logger
                 .log_phase("after_model", ctx.session_id(), None, Some(&output))
                 .await;
@@ -85,9 +82,9 @@ pub fn after_model(
     })
 }
 
-use maco_core::{worktree_mcp_path_access_denied, SessionWorkspace};
+use maco_core::{SessionWorkspace, worktree_mcp_path_access_denied};
 
-use crate::hitl::{tool_denied_content, HitlGate};
+use crate::hitl::{HitlGate, tool_denied_content};
 
 /// `before_tool`：写工具调用日志，并按策略触发 HITL 确认。
 pub fn before_tool_with_hitl(
@@ -104,31 +101,28 @@ pub fn before_tool_with_hitl(
             let tool_name = ctx.tool_name().unwrap_or("unknown");
             let input = ctx
                 .tool_input()
-                .map(|v| prepare_log_payload(v))
+                .map(prepare_log_payload)
                 .unwrap_or_else(|| "{}".into());
             logger.log_tool_start(tool_name, &input).await;
 
             let args = ctx.tool_input().cloned().unwrap_or(serde_json::json!({}));
             let call_id = ctx.invocation_id().to_string();
 
-            if worktree_path_guard {
-                if let Some(ws) = workspace.as_ref() {
-                    if let Some(reason) = worktree_mcp_path_access_denied(
-                        ws.uses_worktree,
-                        &ws.repo_root,
-                        &ws.workspace_root,
-                        tool_name,
-                        &args,
-                    ) {
-                        return Ok(Some(tool_denied_content(tool_name, &call_id, reason)));
-                    }
-                }
+            if worktree_path_guard
+                && let Some(ws) = workspace.as_ref()
+                && let Some(reason) = worktree_mcp_path_access_denied(
+                    ws.uses_worktree,
+                    &ws.repo_root,
+                    &ws.workspace_root,
+                    tool_name,
+                    &args,
+                )
+            {
+                return Ok(Some(tool_denied_content(tool_name, &call_id, reason)));
             }
 
             let source = if tool_name.contains("__") {
                 "mcp"
-            } else if ctx.tool_name().map(|n| n.starts_with("update_") || n == "upsert_todo").unwrap_or(false) {
-                "tool"
             } else {
                 "tool"
             };
@@ -161,11 +155,7 @@ pub fn after_tool(logger: Arc<MacoCallbackLogger>) -> AfterToolCallback {
                 })
                 .unwrap_or_else(|| "{}".into());
             logger
-                .log_tool_end(
-                    tool_name,
-                    &output,
-                    error_message.as_deref(),
-                )
+                .log_tool_end(tool_name, &output, error_message.as_deref())
                 .await;
             Ok(None)
         })

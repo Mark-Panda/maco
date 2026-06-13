@@ -12,7 +12,7 @@ pub const APP_NAME: &str = "maco";
 pub const USER_ID: &str = "local";
 
 /// 顶层配置，当前仅包含数据路径。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     /// 数据文件路径配置。
     #[serde(default)]
@@ -44,12 +44,6 @@ impl Default for DataPaths {
             artifacts_dir: base.join("artifacts"),
             tmp_dir: default_tmp_dir(),
         }
-    }
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self { data: DataPaths::default() }
     }
 }
 
@@ -96,8 +90,8 @@ pub fn load_config() -> MacoResult<AppConfig> {
     }
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| MacoError::config(format!("read {}: {e}", path.display())))?;
-    let mut cfg: AppConfig = toml::from_str(&raw)
-        .map_err(|e| MacoError::config(format!("parse config: {e}")))?;
+    let mut cfg: AppConfig =
+        toml::from_str(&raw).map_err(|e| MacoError::config(format!("parse config: {e}")))?;
     cfg.data = expand_paths(cfg.data);
     Ok(cfg)
 }

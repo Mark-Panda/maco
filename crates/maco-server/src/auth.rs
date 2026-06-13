@@ -6,9 +6,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use maco_governance::{
-    hash_token, has_scope, parse_scopes, required_scope_for_path, SCOPE_ADMIN,
-};
+use maco_governance::{SCOPE_ADMIN, has_scope, hash_token, parse_scopes, required_scope_for_path};
 use tracing::warn;
 
 use crate::AppState;
@@ -26,7 +24,7 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
-    if state.auth_disabled {
+    if state.runtime.auth_disabled {
         req.extensions_mut().insert(AuthContext {
             scopes: vec!["*".into()],
         });
@@ -40,12 +38,12 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    if path == "/api/auth/tokens" && method == "POST" {
-        if let Ok(count) = state.api_tokens.count_enabled().await {
-            if count == 0 {
-                return next.run(req).await;
-            }
-        }
+    if path == "/api/auth/tokens"
+        && method == "POST"
+        && let Ok(count) = state.repos.api_tokens.count_enabled().await
+        && count == 0
+    {
+        return next.run(req).await;
     }
 
     let Some(auth_header) = req
@@ -62,7 +60,7 @@ pub async fn auth_middleware(
         .unwrap_or(auth_header);
 
     let hash = hash_token(token);
-    let record = match state.api_tokens.find_by_hash(&hash).await {
+    let record = match state.repos.api_tokens.find_by_hash(&hash).await {
         Ok(Some(r)) => r,
         Ok(None) => return unauthorized("invalid token"),
         Err(e) => {
@@ -71,12 +69,11 @@ pub async fn auth_middleware(
         }
     };
 
-    if let Some(exp) = &record.expires_at {
-        if let Ok(exp_dt) = chrono::DateTime::parse_from_rfc3339(exp) {
-            if exp_dt < chrono::Utc::now() {
-                return unauthorized("token expired");
-            }
-        }
+    if let Some(exp) = &record.expires_at
+        && let Ok(exp_dt) = chrono::DateTime::parse_from_rfc3339(exp)
+        && exp_dt < chrono::Utc::now()
+    {
+        return unauthorized("token expired");
     }
 
     let scopes = parse_scopes(&record.scopes);
@@ -91,7 +88,7 @@ pub async fn auth_middleware(
         // read-only API routes need any valid token
     }
 
-    let _ = state.api_tokens.touch_last_used(&record.id).await;
+    let _ = state.repos.api_tokens.touch_last_used(&record.id).await;
     req.extensions_mut().insert(AuthContext { scopes });
 
     next.run(req).await
@@ -102,10 +99,10 @@ fn unauthorized(msg: &str) -> Response {
 }
 
 pub fn require_admin(ctx: Option<&AuthContext>) -> Result<(), StatusCode> {
-    if let Some(ctx) = ctx {
-        if has_scope(&ctx.scopes, SCOPE_ADMIN) || has_scope(&ctx.scopes, "*") {
-            return Ok(());
-        }
+    if let Some(ctx) = ctx
+        && (has_scope(&ctx.scopes, SCOPE_ADMIN) || has_scope(&ctx.scopes, "*"))
+    {
+        return Ok(());
     }
     Err(StatusCode::FORBIDDEN)
 }

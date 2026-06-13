@@ -10,7 +10,7 @@ use adk_core::Toolset;
 use adk_tool::mcp::McpServerConfig;
 use adk_tool::{ElicitationHandler, McpServerManager};
 use maco_core::{MacoError, MacoResult};
-use maco_db::{filesystem_mcp_args, FILESYSTEM_MCP_NAME, McpServerRepo};
+use maco_db::{FILESYSTEM_MCP_NAME, McpServerRepo, filesystem_mcp_args};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -95,12 +95,15 @@ fn merge_tmp_env(env: &mut HashMap<String, String>, tmp_dir: &Path) {
 }
 
 /// 按会话缓存 filesystem MCP 子进程，避免 HITL / resume 重复 `npx` 冷启动。
+type SessionFilesystemCache = HashMap<String, (Vec<String>, Arc<SessionFilesystemMcp>)>;
+
+/// 按会话缓存 filesystem MCP 子进程，避免 HITL / resume 重复 `npx` 冷启动。
 #[derive(Clone)]
 pub struct FilesystemMcpCoordinator {
     mcp_servers: McpServerRepo,
     tmp_dir: PathBuf,
     elicitation: Arc<DynamicElicitationHandler>,
-    session_cache: Arc<Mutex<HashMap<String, (Vec<String>, Arc<SessionFilesystemMcp>)>>>,
+    session_cache: Arc<Mutex<SessionFilesystemCache>>,
 }
 
 impl FilesystemMcpCoordinator {
@@ -139,7 +142,10 @@ impl FilesystemMcpCoordinator {
             )
             .await?,
         );
-        cache.insert(session_id.to_string(), (allowed_roots.to_vec(), handle.clone()));
+        cache.insert(
+            session_id.to_string(),
+            (allowed_roots.to_vec(), handle.clone()),
+        );
         Ok(handle)
     }
 

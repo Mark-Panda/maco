@@ -5,16 +5,16 @@ use std::sync::Arc;
 
 use adk_core::{Content, Event, EventActions, Part};
 use adk_memory::{MemoryEntry, SearchRequest};
-use chrono::Utc;
-use maco_storage::memory_admin;
 use adk_session::{CreateRequest, DeleteRequest, GetRequest, ListRequest};
+use chrono::Utc;
 use maco_core::{
-    remove_worktree, resolve_project_root, resolve_session_workspace, AgentPermissionMode,
-    ChatMessage, MacoError, MacoResult, MemoryListItem, MemoryListResponse, MemorySearchResponse,
-    SessionMessagesResponse, APP_NAME, USER_ID,
+    APP_NAME, AgentPermissionMode, ChatMessage, MacoError, MacoResult, MemoryListItem,
+    MemoryListResponse, MemorySearchResponse, SessionMessagesResponse, USER_ID, remove_worktree,
+    resolve_project_root, resolve_session_workspace,
 };
 use maco_db::{ModelRecord, ModelRepo, SessionMetaRecord, SessionMetaRepo};
 use maco_storage::AdkStorage;
+use maco_storage::memory_admin;
 use serde_json::json;
 
 /// 对外统一的 Session + Memory 操作入口（HTTP 层主要依赖此类型）。
@@ -108,11 +108,13 @@ impl SessionFacade {
             .map_err(|e| MacoError::Adk(e.to_string()))?;
         let ids: Vec<String> = adk_sessions.iter().map(|s| s.id().to_string()).collect();
         let mut metas = self.meta.list_by_ids(&ids).await?;
-        let known: std::collections::HashSet<_> = metas.iter().map(|m| m.session_id.clone()).collect();
+        let known: std::collections::HashSet<_> =
+            metas.iter().map(|m| m.session_id.clone()).collect();
         for s in adk_sessions {
             let sid = s.id().to_string();
             if !known.contains(&sid) {
-                let rec = SessionMetaRepo::new_record(sid.clone(), None, None, None, None, None, None);
+                let rec =
+                    SessionMetaRepo::new_record(sid.clone(), None, None, None, None, None, None);
                 let _ = self.meta.insert(&rec).await;
                 metas.push(rec);
             }
@@ -126,7 +128,9 @@ impl SessionFacade {
         if let Some(rec) = self.meta.get(session_id).await? {
             Self::cleanup_worktree(&rec, session_id);
         }
-        self.meta.update_status(session_id, "pending_delete").await?;
+        self.meta
+            .update_status(session_id, "pending_delete")
+            .await?;
         self.adk
             .memory
             .add_session(APP_NAME, USER_ID, session_id, vec![])
@@ -163,8 +167,8 @@ impl SessionFacade {
         if let Some(rec) = self.meta.get(session_id).await? {
             Self::cleanup_worktree(&rec, session_id);
         }
-        let normalized = resolve_project_root(project_root)?
-            .map(|p| p.to_string_lossy().into_owned());
+        let normalized =
+            resolve_project_root(project_root)?.map(|p| p.to_string_lossy().into_owned());
         self.meta
             .update_project_root(session_id, normalized.as_deref())
             .await?;
@@ -216,11 +220,7 @@ impl SessionFacade {
         if ws.uses_worktree {
             let branch = ws.worktree_branch.as_deref().unwrap_or("");
             self.meta
-                .update_worktree_state(
-                    session_id,
-                    &ws.workspace_root.to_string_lossy(),
-                    branch,
-                )
+                .update_worktree_state(session_id, &ws.workspace_root.to_string_lossy(), branch)
                 .await?;
         } else {
             self.meta.clear_worktree_state(session_id).await?;
@@ -229,12 +229,11 @@ impl SessionFacade {
     }
 
     fn cleanup_worktree(rec: &SessionMetaRecord, session_id: &str) {
-        if let Some(root) = rec.project_root.as_deref() {
-            if let Ok(Some(repo)) = resolve_project_root(Some(root)) {
-                if let Err(e) = remove_worktree(&repo, session_id) {
-                    tracing::warn!("cleanup worktree for {session_id}: {e}");
-                }
-            }
+        if let Some(root) = rec.project_root.as_deref()
+            && let Ok(Some(repo)) = resolve_project_root(Some(root))
+            && let Err(e) = remove_worktree(&repo, session_id)
+        {
+            tracing::warn!("cleanup worktree for {session_id}: {e}");
         }
     }
 
@@ -291,18 +290,16 @@ impl SessionFacade {
             .state()
             .get("user:model")
             .and_then(|v| v.as_str().map(str::to_string))
+            && let Some(model) = models.get(&mid).await?
         {
-            if let Some(model) = models.get(&mid).await? {
-                return Ok(model);
-            }
+            return Ok(model);
         }
 
-        if let Some(meta) = self.meta.get(session_id).await? {
-            if let Some(mid) = meta.model_id {
-                if let Some(model) = models.get(&mid).await? {
-                    return Ok(model);
-                }
-            }
+        if let Some(meta) = self.meta.get(session_id).await?
+            && let Some(mid) = meta.model_id
+            && let Some(model) = models.get(&mid).await?
+        {
+            return Ok(model);
         }
 
         models

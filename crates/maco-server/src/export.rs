@@ -2,7 +2,7 @@
 
 use adk_core::{Content, Part};
 use adk_session::GetRequest;
-use maco_core::{MacoError, MacoResult, APP_NAME, USER_ID};
+use maco_core::{APP_NAME, MacoError, MacoResult, USER_ID};
 use maco_db::{PlanRecord, SessionMetaRecord, TodoRecord};
 use maco_storage::AdkStorage;
 
@@ -41,19 +41,22 @@ pub async fn session_markdown(
     }
     out.push('\n');
 
-    if let Some(p) = plan {
-        if !p.content.is_empty() {
-            out.push_str("## Plan\n\n");
-            out.push_str(&p.content);
-            out.push_str("\n\n");
-        }
+    if let Some(p) = plan
+        && !p.content.is_empty()
+    {
+        out.push_str("## Plan\n\n");
+        out.push_str(&p.content);
+        out.push_str("\n\n");
     }
 
     if !todos.is_empty() {
         out.push_str("## Todos\n\n");
         for t in todos {
             let mark = if t.status == "completed" { "x" } else { " " };
-            out.push_str(&format!("- [{mark}] **{}** ({}) — {}\n", t.task_key, t.status, t.title));
+            out.push_str(&format!(
+                "- [{mark}] **{}** ({}) — {}\n",
+                t.task_key, t.status, t.title
+            ));
         }
         out.push('\n');
     }

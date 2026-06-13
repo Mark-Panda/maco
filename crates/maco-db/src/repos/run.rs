@@ -120,29 +120,25 @@ impl RunRepo {
     /// 标记旧 Run 已被新 Run 取代（resume 链路）。
     pub async fn set_superseded_by(&self, run_id: &str, new_run_id: &str) -> MacoResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE maco_runs SET superseded_by = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(new_run_id)
-        .bind(now)
-        .bind(run_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| MacoError::database(e.to_string()))?;
+        sqlx::query("UPDATE maco_runs SET superseded_by = ?, updated_at = ? WHERE id = ?")
+            .bind(new_run_id)
+            .bind(now)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| MacoError::database(e.to_string()))?;
         Ok(())
     }
 
     /// 递增 SSE 事件序号并返回新值。
     pub async fn bump_seq(&self, run_id: &str) -> MacoResult<u64> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE maco_runs SET last_seq = last_seq + 1, updated_at = ? WHERE id = ?",
-        )
-        .bind(now)
-        .bind(run_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| MacoError::database(e.to_string()))?;
+        sqlx::query("UPDATE maco_runs SET last_seq = last_seq + 1, updated_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| MacoError::database(e.to_string()))?;
         let row: (i64,) = sqlx::query_as("SELECT last_seq FROM maco_runs WHERE id = ?")
             .bind(run_id)
             .fetch_one(&self.pool)
@@ -154,35 +150,29 @@ impl RunRepo {
     /// 恢复执行后清空 resume 上下文。
     pub async fn clear_resume_context(&self, run_id: &str) -> MacoResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE maco_runs SET resume_context = NULL, updated_at = ? WHERE id = ?",
-        )
-        .bind(now)
-        .bind(run_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| MacoError::database(e.to_string()))?;
+        sqlx::query("UPDATE maco_runs SET resume_context = NULL, updated_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| MacoError::database(e.to_string()))?;
         Ok(())
     }
 
     /// 会话是否已有 `running` 状态的 Run。
     pub async fn has_running(&self, session_id: &str) -> MacoResult<bool> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM maco_runs WHERE session_id = ? AND status = ?",
-        )
-        .bind(session_id)
-        .bind(RUN_STATUS_RUNNING)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| MacoError::database(e.to_string()))?;
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM maco_runs WHERE session_id = ? AND status = ?")
+                .bind(session_id)
+                .bind(RUN_STATUS_RUNNING)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| MacoError::database(e.to_string()))?;
         Ok(row.0 > 0)
     }
 
     /// 会话当前活跃 Run（`running` / `awaiting_user`，按更新时间最近一条）。
-    pub async fn find_active_for_session(
-        &self,
-        session_id: &str,
-    ) -> MacoResult<Option<RunRecord>> {
+    pub async fn find_active_for_session(&self, session_id: &str) -> MacoResult<Option<RunRecord>> {
         sqlx::query_as::<_, RunRecord>(
             "SELECT id, session_id, status, resume_context, superseded_by, error_message, last_seq, created_at, updated_at
              FROM maco_runs

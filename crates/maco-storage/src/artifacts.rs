@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use adk_artifact::{ArtifactService, FileArtifactService, SaveRequest};
 use adk_core::Part;
-use maco_core::{MacoError, MacoResult, APP_NAME, USER_ID};
+use maco_core::{APP_NAME, MacoError, MacoResult, USER_ID};
 use maco_db::{ArtifactRecord, ArtifactRepo};
 use maco_governance::{mime_for_artifact, validate_artifact};
 use sha2::{Digest, Sha256};
@@ -28,8 +28,8 @@ pub struct ArtifactStore {
 
 impl ArtifactStore {
     pub fn new(base_dir: PathBuf, repo: ArtifactRepo) -> MacoResult<Self> {
-        let adk_inner = FileArtifactService::new(&base_dir)
-            .map_err(|e| MacoError::Adk(e.to_string()))?;
+        let adk_inner =
+            FileArtifactService::new(&base_dir).map_err(|e| MacoError::Adk(e.to_string()))?;
         Ok(Self {
             base_dir,
             repo,
@@ -53,8 +53,7 @@ impl ArtifactStore {
         mime_type: &str,
         bytes: &[u8],
     ) -> MacoResult<ArtifactRecord> {
-        validate_artifact(mime_type, bytes.len())
-            .map_err(|e| MacoError::config(e.to_string()))?;
+        validate_artifact(mime_type, bytes.len()).map_err(|e| MacoError::config(e.to_string()))?;
 
         let id = Uuid::new_v4().to_string();
         let session_dir = self.base_dir.join(session_id);
@@ -78,13 +77,10 @@ impl ArtifactStore {
             )
             .await?;
 
-        if adk_artifacts_enabled() {
-            if let Err(e) = self
-                .sync_adk(session_id, filename, mime_type, bytes)
-                .await
-            {
-                tracing::warn!("adk artifact sync on save: {e}");
-            }
+        if adk_artifacts_enabled()
+            && let Err(e) = self.sync_adk(session_id, filename, mime_type, bytes).await
+        {
+            tracing::warn!("adk artifact sync on save: {e}");
         }
 
         Ok(record)
@@ -127,9 +123,7 @@ impl ArtifactStore {
             .unwrap_or("file")
             .to_string();
         let mime_type = mime_for_artifact(&filename, &bytes);
-        let record = self
-            .save(session_id, &filename, &mime_type, &bytes)
-            .await?;
+        let record = self.save(session_id, &filename, &mime_type, &bytes).await?;
         Ok(Some(record))
     }
 

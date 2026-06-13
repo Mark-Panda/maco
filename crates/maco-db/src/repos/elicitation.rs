@@ -41,6 +41,7 @@ impl ElicitationRepo {
         Self { pool }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert(
         &self,
         session_id: &str,
@@ -129,12 +130,7 @@ impl ElicitationRepo {
         .map_err(|e| MacoError::database(e.to_string()))
     }
 
-    pub async fn submit_response(
-        &self,
-        id: &str,
-        response: &str,
-        status: &str,
-    ) -> MacoResult<()> {
+    pub async fn submit_response(&self, id: &str, response: &str, status: &str) -> MacoResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let rows = sqlx::query(
             "UPDATE maco_elicitation_requests

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use adk_core::{Result as AdkResult, Tool, ToolContext};
 use async_trait::async_trait;
 use maco_db::ReactRepo;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// 将 `ReactRepo` 暴露为 adk `Tool` 列表。
 pub struct ReactTools {
@@ -58,10 +58,7 @@ impl Tool for UpdatePlanTool {
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> AdkResult<Value> {
-        let content = args
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
         let session_id = ctx.session_id();
         let plan = self
             .repo
@@ -128,15 +125,9 @@ impl Tool for UpsertTodoTool {
     }
 
     async fn execute(&self, ctx: Arc<dyn ToolContext>, args: Value) -> AdkResult<Value> {
-        let task_key = args
-            .get("task_key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let task_key = args.get("task_key").and_then(|v| v.as_str()).unwrap_or("");
         let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        let sort_order = args
-            .get("sort_order")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        let sort_order = args.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(0);
         let status = args.get("status").and_then(|v| v.as_str());
         let todo = self
             .repo

@@ -47,6 +47,7 @@ impl SubAgentRunRepo {
     }
 
     /// 创建 `running` 记录；`spawn_count` 为同 parent_run + task_key 的第几次 spawn。
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
         session_id: &str,
@@ -119,12 +120,34 @@ impl SubAgentRunRepo {
         let summary = summary.map(|s| truncate(s, SUMMARY_MAX));
         let error = error.map(|s| truncate(s, ERROR_MAX));
         sqlx::query(
-            "UPDATE maco_sub_agent_runs SET status = ?, summary = ?, error = ?, usage_tokens = ?, finished_at = ? WHERE id = ?",
+            "UPDATE maco_sub_agent_runs
+             SET status = CASE
+                    WHEN status = 'cancelled' AND ? = 'cancelled' THEN status
+                    ELSE ?
+                 END,
+                 summary = CASE
+                    WHEN status = 'cancelled' AND ? = 'cancelled' THEN summary
+                    ELSE ?
+                 END,
+                 error = CASE
+                    WHEN status = 'cancelled' AND ? = 'cancelled' THEN error
+                    ELSE ?
+                 END,
+                 usage_tokens = ?,
+                 finished_at = CASE
+                    WHEN status = 'cancelled' AND ? = 'cancelled' THEN finished_at
+                    ELSE ?
+                 END
+             WHERE id = ?",
         )
         .bind(status)
+        .bind(status)
+        .bind(status)
         .bind(summary)
+        .bind(status)
         .bind(error)
         .bind(usage_tokens)
+        .bind(status)
         .bind(now)
         .bind(id)
         .execute(&self.pool)
@@ -205,5 +228,61 @@ impl SubAgentRunRepo {
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| MacoError::database(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn repeated_cancel_finish_preserves_first_cancel_reason() {
+        let pool = SqlitePool::connect(":memory:").await.expect("sqlite");
+        sqlx::query(
+            "CREATE TABLE maco_sub_agent_runs (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                parent_run_id TEXT NOT NULL,
+                task_key TEXT NOT NULL,
+                worker_agent TEXT NOT NULL,
+                tools_profile TEXT NOT NULL DEFAULT 'coding',
+                status TEXT NOT NULL,
+                instruction TEXT NOT NULL,
+                summary TEXT,
+                error TEXT,
+                spawn_count INTEGER NOT NULL DEFAULT 1,
+                model_id TEXT,
+                usage_tokens INTEGER,
+                started_at TEXT NOT NULL,
+                finished_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("schema");
+        let repo = SubAgentRunRepo::new(pool);
+        let rec = repo
+            .start(
+                "session-1",
+                "run-1",
+                "task-1",
+                "worker-task-1",
+                "coding",
+                "do it",
+                Some("model-1"),
+            )
+            .await
+            .expect("start");
+
+        repo.finish(&rec.id, "cancelled", None, Some("user_cancel"), None)
+            .await
+            .expect("first finish");
+        repo.finish(&rec.id, "cancelled", None, Some("cancelled"), None)
+            .await
+            .expect("second finish");
+
+        let saved = repo.get(&rec.id).await.expect("get").expect("record");
+        assert_eq!(saved.status, "cancelled");
+        assert_eq!(saved.error.as_deref(), Some("user_cancel"));
     }
 }

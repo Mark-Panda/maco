@@ -68,13 +68,13 @@ impl ReactRepo {
         expected_version: Option<i64>,
     ) -> MacoResult<PlanRecord> {
         if let Some(existing) = self.get_plan(session_id).await? {
-            if let Some(v) = expected_version {
-                if existing.version != v {
-                    return Err(MacoError::conflict(format!(
-                        "plan version mismatch: expected {v}, got {}",
-                        existing.version
-                    )));
-                }
+            if let Some(v) = expected_version
+                && existing.version != v
+            {
+                return Err(MacoError::conflict(format!(
+                    "plan version mismatch: expected {v}, got {}",
+                    existing.version
+                )));
             }
             let new_version = existing.version + 1;
             let now = chrono::Utc::now().to_rfc3339();
@@ -347,10 +347,7 @@ fn match_checkbox_status(items: &[PlanCheckboxItem], todo_title: &str) -> Option
 }
 
 fn common_prefix_len(a: &str, b: &str) -> usize {
-    a.chars()
-        .zip(b.chars())
-        .take_while(|(x, y)| x == y)
-        .count()
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
 #[cfg(test)]
@@ -378,7 +375,8 @@ mod tests {
             match_checkbox_status(&items, "实现 HTML 页面结构"),
             Some("pending".into())
         );
-        let done_items = parse_plan_checkbox_items("- [x] 实现 HTML 页面结构\n- [x] 实现 CSS 样式\n");
+        let done_items =
+            parse_plan_checkbox_items("- [x] 实现 HTML 页面结构\n- [x] 实现 CSS 样式\n");
         assert_eq!(
             match_checkbox_status(&done_items, "实现 HTML + CSS + JS 游戏"),
             Some("completed".into())

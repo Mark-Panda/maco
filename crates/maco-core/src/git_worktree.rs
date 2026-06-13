@@ -63,10 +63,18 @@ pub fn git_worktree_status(
     if !enabled {
         return "disabled";
     }
-    if project_root.map(str::trim).filter(|s| !s.is_empty()).is_none() {
+    if project_root
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
         return "no_project";
     }
-    if worktree_path.map(str::trim).filter(|s| !s.is_empty()).is_some() {
+    if worktree_path
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
         return "active";
     }
     let Ok(Some(repo)) = resolve_project_root(project_root) else {
@@ -161,7 +169,10 @@ fn path_literal_in_command(command: &str, path: &Path) -> bool {
 fn tokenize_path_candidates(command: &str) -> Vec<String> {
     command
         .split_whitespace()
-        .map(|t| t.trim_matches(|c: char| "\"'`;,|&(){}<>".contains(c)).to_string())
+        .map(|t| {
+            t.trim_matches(|c: char| "\"'`;,|&(){}<>".contains(c))
+                .to_string()
+        })
         .filter(|t| {
             !t.is_empty()
                 && (t.starts_with('/')
@@ -320,7 +331,9 @@ fn git_worktree_add(
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(MacoError::config(format!("git worktree add failed: {stderr}")))
+    Err(MacoError::config(format!(
+        "git worktree add failed: {stderr}"
+    )))
 }
 
 /// 为会话创建或复用 worktree；非 Git 仓库时返回 `None`。
@@ -344,9 +357,7 @@ pub fn ensure_worktree(
                 branch,
             }));
         }
-        tracing::info!(
-            "worktree branch mismatch (actual={actual}, expected={branch}), recreating"
-        );
+        tracing::info!("worktree branch mismatch (actual={actual}, expected={branch}), recreating");
         remove_worktree(repo_root, session_id)?;
     } else if worktree_path.exists() {
         remove_worktree(repo_root, session_id)?;
@@ -505,13 +516,9 @@ pub fn worktree_mcp_path_access_denied(
     tool_name: &str,
     args: &Value,
 ) -> Option<&'static str> {
-    if let Some(reason) = filesystem_tool_access_denied(
-        uses_worktree,
-        repo_root,
-        workspace_root,
-        tool_name,
-        args,
-    ) {
+    if let Some(reason) =
+        filesystem_tool_access_denied(uses_worktree, repo_root, workspace_root, tool_name, args)
+    {
         return Some(reason);
     }
     if !uses_worktree || !tool_name.contains("__") {
@@ -571,10 +578,7 @@ mod tests {
 
     #[test]
     fn filesystem_guard_blocks_repo_path_in_args() {
-        let repo = std::env::temp_dir().join(format!(
-            "maco-fs-guard-repo-{}",
-            std::process::id()
-        ));
+        let repo = std::env::temp_dir().join(format!("maco-fs-guard-repo-{}", std::process::id()));
         let wt = repo.join("worktree");
         std::fs::create_dir_all(&wt).expect("create worktree dir");
         let args = serde_json::json!({ "path": repo.to_string_lossy() });
@@ -596,20 +600,12 @@ mod tests {
 
     #[test]
     fn custom_mcp_guard_blocks_repo_path() {
-        let repo = std::env::temp_dir().join(format!(
-            "maco-mcp-guard-repo-{}",
-            std::process::id()
-        ));
+        let repo = std::env::temp_dir().join(format!("maco-mcp-guard-repo-{}", std::process::id()));
         let wt = repo.join("worktree");
         std::fs::create_dir_all(&wt).expect("create worktree dir");
         let args = serde_json::json!({ "file": repo.to_string_lossy() });
-        let denied = worktree_mcp_path_access_denied(
-            true,
-            &repo,
-            &wt,
-            "custom_fs__read_document",
-            &args,
-        );
+        let denied =
+            worktree_mcp_path_access_denied(true, &repo, &wt, "custom_fs__read_document", &args);
         assert_eq!(
             denied,
             Some("MCP tool path targets main repository outside worktree")

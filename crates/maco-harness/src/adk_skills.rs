@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use adk_skill::{
-    load_skill_index_with_extras, SelectionPolicy, SkillDocument, SkillIndex, SkillResult,
+    SelectionPolicy, SkillDocument, SkillIndex, SkillResult, load_skill_index_with_extras,
 };
 use maco_core::default_skills_dir;
 
@@ -48,7 +48,10 @@ impl AdkSkillManager {
     }
 
     pub fn remove(&self, name: &str) {
-        self.disabled.write().expect("skill disabled lock").remove(name);
+        self.disabled
+            .write()
+            .expect("skill disabled lock")
+            .remove(name);
         let mut index = self.full_index.write().expect("skill index lock");
         let skills: Vec<SkillDocument> = index
             .skills()
@@ -85,9 +88,7 @@ impl AdkSkillManager {
     }
 
     pub fn find_by_name(&self, name: &str) -> Option<SkillDocument> {
-        self.full_index()
-            .find_by_name(name)
-            .cloned()
+        self.full_index().find_by_name(name).cloned()
     }
 
     pub fn enabled_count(&self) -> usize {

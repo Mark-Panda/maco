@@ -28,8 +28,14 @@ async fn tick(jobs: &JobRepo) -> maco_core::MacoResult<()> {
         jobs.update_run_result(&job.id, "running", None, None, None)
             .await?;
         let (status, result, err, next) = run_job(&job).await;
-        jobs.update_run_result(&job.id, &status, result.as_deref(), err.as_deref(), next.as_deref())
-            .await?;
+        jobs.update_run_result(
+            &job.id,
+            &status,
+            result.as_deref(),
+            err.as_deref(),
+            next.as_deref(),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -42,7 +48,9 @@ pub async fn run_job_public(
 }
 
 /// 按 `job_type` 分发执行逻辑，返回 (status, result, error, next_run_at)。
-async fn run_job(job: &maco_db::JobRecord) -> (String, Option<String>, Option<String>, Option<String>) {
+async fn run_job(
+    job: &maco_db::JobRecord,
+) -> (String, Option<String>, Option<String>, Option<String>) {
     match job.job_type.as_str() {
         "ping" => (
             "completed".into(),
@@ -53,7 +61,10 @@ async fn run_job(job: &maco_db::JobRecord) -> (String, Option<String>, Option<St
         "log" => {
             let msg = serde_json::from_str::<serde_json::Value>(&job.payload)
                 .ok()
-                .and_then(|v| v.get("message").and_then(|m| m.as_str().map(str::to_string)))
+                .and_then(|v| {
+                    v.get("message")
+                        .and_then(|m| m.as_str().map(str::to_string))
+                })
                 .unwrap_or_else(|| job.payload.clone());
             info!("job log [{}]: {msg}", job.name);
             (

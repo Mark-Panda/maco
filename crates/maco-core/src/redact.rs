@@ -31,7 +31,14 @@ pub fn basic_redact(text: &str) -> String {
         return text.to_string();
     }
     let mut out = text.to_string();
-    for pattern in ["sk-ant-", "sk-proj-", "sk-", "Bearer ", "api_key", "x-api-key"] {
+    for pattern in [
+        "sk-ant-",
+        "sk-proj-",
+        "sk-",
+        "Bearer ",
+        "api_key",
+        "x-api-key",
+    ] {
         if out.contains(pattern) {
             out = out.replace(pattern, "[REDACTED]");
         }

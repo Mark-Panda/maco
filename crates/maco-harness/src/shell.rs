@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use adk_core::{AdkError, Result, Tool, ToolContext};
 use async_trait::async_trait;
-use maco_core::{bash_command_targets_main_repo, SessionWorkspace};
+use maco_core::{SessionWorkspace, bash_command_targets_main_repo};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// 执行 shell 命令；工作目录为会话工作区（worktree 或项目根）。
 pub struct MacoBashTool {
@@ -60,18 +60,15 @@ impl Tool for MacoBashTool {
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         let args: BashArgs = serde_json::from_value(args)
             .map_err(|e| AdkError::tool(format!("invalid bash arguments: {e}")))?;
-        if self.worktree_path_guard {
-            if let Some(ref ws) = self.workspace {
-                if ws.uses_worktree {
-                    if let Some(reason) =
-                        bash_command_targets_main_repo(&args.command, &ws.repo_root, &ws.workspace_root)
-                    {
-                        return Err(AdkError::tool(format!(
-                            "command blocked ({reason}); edit files in the worktree workspace only"
-                        )));
-                    }
-                }
-            }
+        if self.worktree_path_guard
+            && let Some(ref ws) = self.workspace
+            && ws.uses_worktree
+            && let Some(reason) =
+                bash_command_targets_main_repo(&args.command, &ws.repo_root, &ws.workspace_root)
+        {
+            return Err(AdkError::tool(format!(
+                "command blocked ({reason}); edit files in the worktree workspace only"
+            )));
         }
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-lc")

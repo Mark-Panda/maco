@@ -36,7 +36,7 @@ fn should_log_model_response(body: &str) -> bool {
         .get("turn_complete")
         .and_then(|b| b.as_bool())
         .unwrap_or(false);
-    !(partial && !turn_complete)
+    !partial || turn_complete
 }
 
 /// 绑定 session/run 的回调日志记录器。
@@ -118,12 +118,7 @@ impl MacoCallbackLogger {
         }
     }
 
-    pub async fn log_tool_end(
-        &self,
-        tool_name: &str,
-        output: &str,
-        error_message: Option<&str>,
-    ) {
+    pub async fn log_tool_end(&self, tool_name: &str, output: &str, error_message: Option<&str>) {
         let span_id = Uuid::new_v4().to_string();
         let status = if error_message.is_some() {
             "failed"
@@ -161,7 +156,8 @@ mod tests {
 
     #[test]
     fn skips_partial_streaming_chunks() {
-        let body = r#"{"partial":true,"turn_complete":false,"content":{"parts":[{"thinking":" a"}]}}"#;
+        let body =
+            r#"{"partial":true,"turn_complete":false,"content":{"parts":[{"thinking":" a"}]}}"#;
         assert!(!should_log_model_response(body));
     }
 

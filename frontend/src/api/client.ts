@@ -642,8 +642,13 @@ export async function streamRun(
   sessionId: string,
   runId: string,
   onEvent: (data: Record<string, unknown>) => void,
+  afterSeq?: number,
 ) {
-  const res = await fetch(`${API}/sessions/${sessionId}/runs/${runId}/stream`, {
+  const url = new URL(`${API}/sessions/${sessionId}/runs/${runId}/stream`, window.location.origin);
+  if (afterSeq !== undefined) {
+    url.searchParams.set("after_seq", String(afterSeq));
+  }
+  const res = await fetch(url.toString(), {
     headers: authHeaders(),
   });
   await consumeSse(res, onEvent);

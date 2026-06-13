@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use adk_telemetry::span_exporter::AdkSpanExporter;
-use adk_telemetry::{init_with_adk_exporter, init_with_otlp, TelemetryError};
+use adk_telemetry::{TelemetryError, init_with_adk_exporter, init_with_otlp};
 
 /// 遥测初始化结果（内存 span 导出器，供调试/后续 API 扩展）。
 pub struct TelemetryInit {
@@ -21,7 +21,9 @@ pub fn init_maco_tracing() -> TelemetryInit {
                     return TelemetryInit { adk_exporter: None };
                 }
                 Err(TelemetryError::Init(msg)) => {
-                    eprintln!("MACO_OTLP_ENDPOINT init failed ({msg}); falling back to ADK span exporter");
+                    eprintln!(
+                        "MACO_OTLP_ENDPOINT init failed ({msg}); falling back to ADK span exporter"
+                    );
                 }
             }
         }
@@ -37,8 +39,9 @@ pub fn init_maco_tracing() -> TelemetryInit {
         Err(TelemetryError::Init(msg)) => {
             tracing_subscriber::fmt()
                 .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("maco=info,maco_harness=info")),
+                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                        tracing_subscriber::EnvFilter::new("maco=info,maco_harness=info")
+                    }),
                 )
                 .init();
             tracing::warn!("telemetry init fallback (plain fmt): {msg}");

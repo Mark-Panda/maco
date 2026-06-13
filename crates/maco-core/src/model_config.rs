@@ -1,6 +1,6 @@
 //! 模型 `config` JSON 字段解析：内联 API Key 的合并与 API 脱敏。
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::error::{MacoError, MacoResult};
 
@@ -33,11 +33,7 @@ pub fn redact_config_for_api(config: &str) -> String {
 }
 
 fn obj_or_empty(v: &Value) -> Value {
-    if v.is_object() {
-        v.clone()
-    } else {
-        json!({})
-    }
+    if v.is_object() { v.clone() } else { json!({}) }
 }
 
 /// 合并或清除 `config` 中的 `api_key`；`None` 表示不修改已有密钥。

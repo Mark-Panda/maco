@@ -6,7 +6,7 @@ use std::time::Duration;
 use adk_core::{AfterModelCallback, BeforeModelCallback, BeforeModelResult};
 use maco_core::SseEnvelope;
 use maco_telemetry::MacoCallbackLogger;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::orchestrator::RunOrchestrator;

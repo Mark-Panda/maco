@@ -4,8 +4,8 @@ use chrono::Utc;
 use std::path::Path;
 
 use maco_core::{
-    probe_git_repository, resolve_project_root, AgentPermissionMode, DEFAULT_GIT_BRANCH_PREFIX,
-    GitRepoProbe, MacoError, MacoResult,
+    AgentPermissionMode, DEFAULT_GIT_BRANCH_PREFIX, GitRepoProbe, MacoError, MacoResult,
+    probe_git_repository, resolve_project_root,
 };
 use sqlx::SqlitePool;
 
@@ -110,7 +110,10 @@ impl SessionMetaRepo {
         for id in ids {
             query = query.bind(id);
         }
-        query.fetch_all(&self.pool).await.map_err(|e| MacoError::database(e.to_string()))
+        query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| MacoError::database(e.to_string()))
     }
 
     pub async fn update_status(&self, session_id: &str, status: &str) -> MacoResult<()> {
@@ -175,14 +178,12 @@ impl SessionMetaRepo {
             .filter(|s| !s.is_empty());
 
         if rec.git_worktree_enabled != 0 {
-            if project.is_none() {
-                return None;
-            }
+            project?;
             // Git 仓库且 worktree 待 provision：不把主仓库加入 MCP，Run 内会先 provision。
-            if let Ok(Some(repo)) = resolve_project_root(rec.project_root.as_deref()) {
-                if probe_git_repository(&repo) == GitRepoProbe::Available {
-                    return None;
-                }
+            if let Ok(Some(repo)) = resolve_project_root(rec.project_root.as_deref())
+                && probe_git_repository(&repo) == GitRepoProbe::Available
+            {
+                return None;
             }
             return project
                 .filter(|p| Path::new(p).exists())
@@ -200,7 +201,9 @@ impl SessionMetaRepo {
         session_id: &str,
     ) -> MacoResult<Option<String>> {
         let rec = self.get(session_id).await?;
-        Ok(rec.as_ref().and_then(Self::agent_workspace_root_from_record))
+        Ok(rec
+            .as_ref()
+            .and_then(Self::agent_workspace_root_from_record))
     }
 
     /// 各活跃会话 Agent 工作目录并集（每会话按 worktree 策略单独计算，避免主仓库与 worktree 混用）。
@@ -208,10 +211,10 @@ impl SessionMetaRepo {
         let mut seen = std::collections::HashSet::new();
         let mut roots = Vec::new();
         for rec in self.list_active().await? {
-            if let Some(root) = Self::agent_workspace_root_from_record(&rec) {
-                if seen.insert(root.clone()) {
-                    roots.push(root);
-                }
+            if let Some(root) = Self::agent_workspace_root_from_record(&rec)
+                && seen.insert(root.clone())
+            {
+                roots.push(root);
             }
         }
         Ok(roots)
@@ -327,9 +330,8 @@ impl SessionMetaRepo {
     }
 
     pub async fn list_orphans(&self) -> MacoResult<Vec<SessionMetaRecord>> {
-        let q = format!(
-            "{SESSION_META_SELECT} WHERE status IN ('orphan_create', 'pending_delete')"
-        );
+        let q =
+            format!("{SESSION_META_SELECT} WHERE status IN ('orphan_create', 'pending_delete')");
         sqlx::query_as::<_, SessionMetaRecord>(&q)
             .fetch_all(&self.pool)
             .await
@@ -356,10 +358,7 @@ impl SessionMetaRepo {
             model_id,
             project_id: None,
             project_root,
-            permission_mode: permission_mode
-                .unwrap_or_default()
-                .as_str()
-                .to_string(),
+            permission_mode: permission_mode.unwrap_or_default().as_str().to_string(),
             git_worktree_enabled: if git_worktree_enabled.unwrap_or(true) {
                 1
             } else {

@@ -28,5 +28,8 @@ impl SessionMetaView {
 }
 
 pub fn enrich_sessions(records: Vec<SessionMetaRecord>) -> Vec<SessionMetaView> {
-    records.into_iter().map(SessionMetaView::from_record).collect()
+    records
+        .into_iter()
+        .map(SessionMetaView::from_record)
+        .collect()
 }

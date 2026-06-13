@@ -34,20 +34,18 @@ impl SkillRepo {
     }
 
     pub async fn list(&self) -> MacoResult<Vec<SkillRecord>> {
-        Ok(sqlx::query_as::<_, SkillRecord>(
-            "SELECT * FROM maco_skills ORDER BY name ASC",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| MacoError::config(format!("list skills: {e}")))?)
+        sqlx::query_as::<_, SkillRecord>("SELECT * FROM maco_skills ORDER BY name ASC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| MacoError::config(format!("list skills: {e}")))
     }
 
     pub async fn get_by_name(&self, name: &str) -> MacoResult<Option<SkillRecord>> {
-        Ok(sqlx::query_as::<_, SkillRecord>("SELECT * FROM maco_skills WHERE name = ?")
+        sqlx::query_as::<_, SkillRecord>("SELECT * FROM maco_skills WHERE name = ?")
             .bind(name)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| MacoError::config(format!("get skill: {e}")))?)
+            .map_err(|e| MacoError::config(format!("get skill: {e}")))
     }
 
     pub async fn upsert_from_scan(
@@ -103,7 +101,9 @@ impl SkillRepo {
                 .map_err(|e| MacoError::config(format!("delete skills: {e}")))?;
             return Ok(result.rows_affected());
         }
-        let placeholders = std::iter::repeat_n("?", names.len()).collect::<Vec<_>>().join(", ");
+        let placeholders = std::iter::repeat_n("?", names.len())
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!("DELETE FROM maco_skills WHERE name NOT IN ({placeholders})");
         let mut query = sqlx::query(&sql);
         for name in names {
@@ -119,15 +119,14 @@ impl SkillRepo {
     pub async fn set_enabled(&self, name: &str, enabled: bool) -> MacoResult<SkillRecord> {
         let now = chrono::Utc::now().to_rfc3339();
         let flag = if enabled { 1 } else { 0 };
-        let result = sqlx::query(
-            "UPDATE maco_skills SET enabled = ?, updated_at = ? WHERE name = ?",
-        )
-        .bind(flag)
-        .bind(&now)
-        .bind(name)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| MacoError::config(format!("set skill enabled: {e}")))?;
+        let result =
+            sqlx::query("UPDATE maco_skills SET enabled = ?, updated_at = ? WHERE name = ?")
+                .bind(flag)
+                .bind(&now)
+                .bind(name)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| MacoError::config(format!("set skill enabled: {e}")))?;
         if result.rows_affected() == 0 {
             return Err(MacoError::not_found("skill"));
         }

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check server
+        run: cargo check -p maco-server --no-default-features
+
+      - name: Test DB sub-agent runs
+        run: cargo test -p maco-db repeated_cancel_finish_preserves_first_cancel_reason
+
+      - name: Test DB run events
+        run: cargo test -p maco-db list_after_returns_events_newer_than_seq
+
+      - name: Test harness MCP pool
+        run: cargo test -p maco-harness mcp_pool
+
+      - name: Test harness run stream
+        run: cargo test -p maco-harness run_stream
+
+      - name: Test harness sub-agent
+        run: cargo test -p maco-harness sub_agent

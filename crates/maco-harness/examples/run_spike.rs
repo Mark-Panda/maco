@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use adk_core::{Content, Part};
 use adk_memory::{MemoryService, SearchRequest, SqliteMemoryService};
 use adk_runner::Runner;
-use adk_session::{CreateRequest, DeleteRequest, ListRequest, SessionService, SqliteSessionService};
-use maco_core::{sqlite_url, APP_NAME, USER_ID};
+use adk_session::{
+    CreateRequest, DeleteRequest, ListRequest, SessionService, SqliteSessionService,
+};
+use maco_core::{APP_NAME, USER_ID, sqlite_url};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -103,6 +103,7 @@ impl McpServerRepo {
             .ok_or_else(|| MacoError::database("mcp server missing after insert"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
         id: &str,
@@ -150,10 +151,7 @@ const FILESYSTEM_MCP_PACKAGE: &str = "@modelcontextprotocol/server-filesystem";
 
 /// 构造 filesystem MCP stdio 参数 JSON（`npx -y @modelcontextprotocol/server-filesystem <roots...>`）。
 pub fn filesystem_mcp_args(allowed_roots: &[String]) -> MacoResult<String> {
-    let mut args = vec![
-        "-y".to_string(),
-        FILESYSTEM_MCP_PACKAGE.to_string(),
-    ];
+    let mut args = vec!["-y".to_string(), FILESYSTEM_MCP_PACKAGE.to_string()];
     args.extend(allowed_roots.iter().cloned());
     serde_json::to_string(&args).map_err(|e| MacoError::config(format!("mcp args json: {e}")))
 }
@@ -172,4 +170,3 @@ pub async fn seed_default_filesystem_mcp(
         .await?;
     Ok(())
 }
-

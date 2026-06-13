@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::error::MacoResult;
-use crate::git_worktree::{ensure_worktree, is_git_repository, DEFAULT_GIT_BRANCH_PREFIX};
+use crate::git_worktree::{DEFAULT_GIT_BRANCH_PREFIX, ensure_worktree, is_git_repository};
 use crate::resolve_project_root;
 
 /// 会话工作区解析结果。
@@ -68,17 +68,15 @@ pub fn workspace_from_cached(
     let Some(repo) = resolve_project_root(project_root)? else {
         return Ok(None);
     };
-    if git_worktree_enabled {
-        if let Some(path) = git_worktree_path.filter(|p| !p.trim().is_empty()) {
-            let workspace = PathBuf::from(path);
-            if workspace.exists() {
-                return Ok(Some(SessionWorkspace {
-                    repo_root: repo.clone(),
-                    workspace_root: workspace,
-                    uses_worktree: true,
-                    worktree_branch: git_worktree_branch.map(str::to_string),
-                }));
-            }
+    if git_worktree_enabled && let Some(path) = git_worktree_path.filter(|p| !p.trim().is_empty()) {
+        let workspace = PathBuf::from(path);
+        if workspace.exists() {
+            return Ok(Some(SessionWorkspace {
+                repo_root: repo.clone(),
+                workspace_root: workspace,
+                uses_worktree: true,
+                worktree_branch: git_worktree_branch.map(str::to_string),
+            }));
         }
     }
     Ok(Some(SessionWorkspace {

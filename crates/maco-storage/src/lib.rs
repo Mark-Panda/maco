@@ -7,12 +7,14 @@ use std::sync::Arc;
 
 use adk_memory::{MemoryService, MemoryServiceAdapter, SqliteMemoryService};
 use adk_session::{SessionService, SqliteSessionService};
-use maco_core::{adk_memory_url, adk_session_url, DataPaths, MacoError, MacoResult, APP_NAME, USER_ID};
-use sqlx::sqlite::SqliteConnectOptions;
+use maco_core::{
+    APP_NAME, DataPaths, MacoError, MacoResult, USER_ID, adk_memory_url, adk_session_url,
+};
 use sqlx::SqlitePool;
+use sqlx::sqlite::SqliteConnectOptions;
 use std::str::FromStr;
 
-pub use artifacts::{adk_artifacts_enabled, ArtifactStore};
+pub use artifacts::{ArtifactStore, adk_artifacts_enabled};
 
 /// 封装 adk `SessionService` 与 `MemoryService` 的打开与共享句柄。
 pub struct AdkStorage {
@@ -22,6 +24,8 @@ pub struct AdkStorage {
     pub memory: Arc<dyn MemoryService>,
     /// Agent 侧 Memory trait 适配器。
     pub memory_adapter: Arc<dyn adk_core::Memory>,
+    /// sessions.db 连接池（健康检查用）。
+    session_pool: SqlitePool,
     /// memory.db 连接池（管理 API 直查用）。
     memory_pool: SqlitePool,
 }
@@ -39,6 +43,12 @@ impl AdkStorage {
             .migrate()
             .await
             .map_err(|e| MacoError::Adk(e.to_string()))?;
+        let session_options = SqliteConnectOptions::from_str(&session_url)
+            .map_err(|e| MacoError::Adk(e.to_string()))?
+            .create_if_missing(true);
+        let session_pool = SqlitePool::connect_with(session_options)
+            .await
+            .map_err(|e| MacoError::Adk(e.to_string()))?;
 
         let memory_options = SqliteConnectOptions::from_str(&memory_url)
             .map_err(|e| MacoError::Adk(e.to_string()))?
@@ -54,18 +64,20 @@ impl AdkStorage {
 
         let session: Arc<dyn SessionService> = Arc::new(session_svc);
         let memory: Arc<dyn MemoryService> = Arc::new(memory_svc);
-        let memory_adapter = Arc::new(MemoryServiceAdapter::new(
-            memory.clone(),
-            APP_NAME,
-            USER_ID,
-        )) as Arc<dyn adk_core::Memory>;
+        let memory_adapter = Arc::new(MemoryServiceAdapter::new(memory.clone(), APP_NAME, USER_ID))
+            as Arc<dyn adk_core::Memory>;
 
         Ok(Self {
             session,
             memory,
             memory_adapter,
+            session_pool,
             memory_pool,
         })
+    }
+
+    pub fn session_pool(&self) -> &SqlitePool {
+        &self.session_pool
     }
 
     pub fn memory_pool(&self) -> &SqlitePool {

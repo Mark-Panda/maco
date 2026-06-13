@@ -5,13 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adk_tool::ElicitationHandler;
-use maco_core::{MacoError, MacoResult, ResumeContext, SseEnvelope, RUN_STATUS_AWAITING_USER};
+use maco_core::{MacoError, MacoResult, RUN_STATUS_AWAITING_USER, ResumeContext, SseEnvelope};
 use maco_db::ElicitationRepo;
-use rmcp::model::{
-    CreateElicitationResult, ElicitationAction, ElicitationSchema,
-};
+use rmcp::model::{CreateElicitationResult, ElicitationAction, ElicitationSchema};
 use serde_json::Value;
-use tokio::sync::{mpsc, Mutex, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::orchestrator::RunOrchestrator;
 
@@ -195,8 +193,8 @@ impl MacoElicitationHandler {
         payload: Value,
         external_id: Option<&str>,
     ) -> Result<CreateElicitationResult, Box<dyn std::error::Error + Send + Sync>> {
-        let expires_at = chrono::Utc::now()
-            + chrono::Duration::seconds(DEFAULT_ELICITATION_TTL_SECS as i64);
+        let expires_at =
+            chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_ELICITATION_TTL_SECS as i64);
         let expires_at_str = expires_at.to_rfc3339();
         let payload_str = serde_json::to_string(&payload)?;
 
@@ -264,10 +262,7 @@ impl MacoElicitationHandler {
             }
         };
 
-        let _ = self
-            .orchestrator
-            .continue_from_awaiting(&self.run_id)
-            .await;
+        let _ = self.orchestrator.continue_from_awaiting(&self.run_id).await;
 
         Ok(result)
     }
@@ -361,8 +356,8 @@ pub async fn respond_to_elicitation(
         ElicitationAction::Cancel => "cancelled",
     };
     let result = build_elicitation_result(action, content.clone());
-    let response_json = serde_json::to_string(&result)
-        .map_err(|e| MacoError::config(e.to_string()))?;
+    let response_json =
+        serde_json::to_string(&result).map_err(|e| MacoError::config(e.to_string()))?;
     repo.submit_response(elicitation_id, &response_json, status)
         .await?;
 

@@ -117,7 +117,10 @@ mod tests {
             resolve_action(&policies, "mcp", "delete_file"),
             PolicyAction::Confirm
         );
-        assert_eq!(resolve_action(&policies, "tool", "delete_file"), PolicyAction::Allow);
+        assert_eq!(
+            resolve_action(&policies, "tool", "delete_file"),
+            PolicyAction::Allow
+        );
     }
 
     #[test]
@@ -126,19 +129,17 @@ mod tests {
             policy("tool", "bash", "confirm"),
             policy("tool", "bash", "deny"),
         ];
-        assert_eq!(resolve_action(&policies, "tool", "bash"), PolicyAction::Deny);
+        assert_eq!(
+            resolve_action(&policies, "tool", "bash"),
+            PolicyAction::Deny
+        );
     }
 
     #[test]
     fn full_access_skips_confirm() {
         let policies = vec![policy("tool", "bash", "confirm")];
         assert_eq!(
-            resolve_action_with_mode(
-                &policies,
-                AgentPermissionMode::FullAccess,
-                "tool",
-                "bash",
-            ),
+            resolve_action_with_mode(&policies, AgentPermissionMode::FullAccess, "tool", "bash",),
             PolicyAction::Allow
         );
     }
