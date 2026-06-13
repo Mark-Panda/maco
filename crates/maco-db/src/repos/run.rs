@@ -1,6 +1,8 @@
 //! `maco_runs` 表：Run 状态机、resume 上下文与 SSE 序号。
 
-use maco_core::{MacoError, MacoResult, RUN_STATUS_RUNNING};
+use maco_core::{
+    MacoError, MacoResult, RUN_STATUS_AWAITING_USER, RUN_STATUS_FAILED, RUN_STATUS_RUNNING,
+};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -163,13 +165,65 @@ impl RunRepo {
         Ok(())
     }
 
-    /// 会话是否已有 `running` 状态的 Run（防并发聊天）。
+    /// 会话是否已有 `running` 状态的 Run。
     pub async fn has_running(&self, session_id: &str) -> MacoResult<bool> {
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM maco_runs WHERE session_id = ? AND status = ?",
         )
         .bind(session_id)
         .bind(RUN_STATUS_RUNNING)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| MacoError::database(e.to_string()))?;
+        Ok(row.0 > 0)
+    }
+
+    /// 会话当前活跃 Run（`running` / `awaiting_user`，按更新时间最近一条）。
+    pub async fn find_active_for_session(
+        &self,
+        session_id: &str,
+    ) -> MacoResult<Option<RunRecord>> {
+        sqlx::query_as::<_, RunRecord>(
+            "SELECT id, session_id, status, resume_context, superseded_by, error_message, last_seq, created_at, updated_at
+             FROM maco_runs
+             WHERE session_id = ? AND status IN (?, ?)
+             ORDER BY updated_at DESC
+             LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(RUN_STATUS_RUNNING)
+        .bind(RUN_STATUS_AWAITING_USER)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| MacoError::database(e.to_string()))
+    }
+
+    /// 服务重启后将孤儿 `running` / `awaiting_user` 标为失败。
+    pub async fn fail_stale_active_runs(&self, reason: &str) -> MacoResult<u64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE maco_runs SET status = ?, error_message = ?, updated_at = ?
+             WHERE status IN (?, ?)",
+        )
+        .bind(RUN_STATUS_FAILED)
+        .bind(reason)
+        .bind(&now)
+        .bind(RUN_STATUS_RUNNING)
+        .bind(RUN_STATUS_AWAITING_USER)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| MacoError::database(e.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
+    /// 会话是否已有活跃 Run（`running` 或 `awaiting_user`，防叠加新 Run）。
+    pub async fn has_active_run(&self, session_id: &str) -> MacoResult<bool> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM maco_runs WHERE session_id = ? AND status IN (?, ?)",
+        )
+        .bind(session_id)
+        .bind(RUN_STATUS_RUNNING)
+        .bind(RUN_STATUS_AWAITING_USER)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| MacoError::database(e.to_string()))?;

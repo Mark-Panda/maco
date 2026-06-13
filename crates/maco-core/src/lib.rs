@@ -15,8 +15,10 @@ pub use config::{
 };
 pub use git_worktree::{
     bash_command_targets_main_repo, branch_name, current_branch, ensure_worktree,
-    git_worktree_status, is_git_repository, probe_git_repository, remove_worktree,
-    worktree_path_for_session, DEFAULT_GIT_BRANCH_PREFIX, GitRepoProbe, GitWorktreeInfo,
+    filesystem_tool_access_denied, git_worktree_status, is_git_repository, path_targets_forbidden_repo_root,
+    worktree_mcp_path_access_denied,
+    probe_git_repository, remove_worktree, worktree_path_for_session, DEFAULT_GIT_BRANCH_PREFIX,
+    GitRepoProbe, GitWorktreeInfo,
 };
 pub use workspace::{resolve_session_workspace, workspace_from_cached, SessionWorkspace};
 pub use error::{MacoError, MacoResult};

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use adk_core::identity::{SessionId, UserId};
-use adk_core::{Content, Event, Part, Tool};
+use adk_core::{Content, Event, Part, Tool, ToolRegistry};
 use adk_rust::prelude::*;
 use adk_tool::{LoadArtifactsTool, SimpleToolContext};
 use futures::StreamExt;
@@ -12,11 +12,10 @@ use maco_core::{
     SseEnvelope, RUN_STATUS_AWAITING_USER, APP_NAME, USER_ID,
 };
 use maco_db::{
-    rebuild_filesystem_mcp_roots, CallbackLogRepo, ElicitationRepo, McpServerRepo, ModelRecord,
-    ReactRepo, SessionMetaRepo, ToolPolicyRecord, UsageRepo,
+    CallbackLogRepo, ElicitationRepo, ModelRecord, ReactRepo, SessionMetaRepo,
+    SubAgentRunRepo, ToolPolicyRecord, UsageRepo,
 };
-use adk_agent::guardrails::{GuardrailSet, PiiRedactor};
-use maco_governance::{pii_guardrail_enabled, pricing_from_model, redact_sse_payload, redact_text};
+use maco_governance::{pricing_from_model, redact_sse_payload, redact_text};
 use maco_react::ReactTools;
 use maco_storage::{adk_artifacts_enabled, AdkStorage, ArtifactStore};
 use maco_telemetry::MacoCallbackLogger;
@@ -26,14 +25,22 @@ use crate::artifact_capture::{
     after_tool_with_artifacts, snapshot_scratch_files, ArtifactCaptureState,
 };
 use crate::callbacks::{
-    after_agent, after_model, before_agent, before_model, before_tool_with_hitl,
+    after_agent, agent_guardrails, before_agent, before_tool_with_hitl,
 };
+use crate::model_activity::{
+    after_model_with_activity, before_model_with_activity, ModelActivityState,
+};
+use crate::sub_agent::{
+    emit_sub_agent_cancelled, sanitize_task_key, spawn_sub_agent_instruction_block,
+    SubAgentCoordinator, SubAgentParentBridge, SubAgentRunContext,
+};
+use crate::filesystem_mcp::FilesystemMcpCoordinator;
 use crate::elicitation::{
     respond_to_elicitation, ElicitationBroker, ElicitationRunContext, MacoElicitationHandler,
 };
 use crate::hitl::{build_resume_content, build_tool_result_content, HitlBroker, HitlGate};
 use crate::mcp_pool::McpPool;
-use crate::model_factory::build_llm;
+use crate::model_factory::{build_llm_for_run, max_tokens_for_model};
 use crate::orchestrator::RunOrchestrator;
 use crate::run_stream::RunStreamRegistry;
 use crate::shell::MacoBashTool;
@@ -68,13 +75,16 @@ pub struct MacoHarness {
     elicitation_broker: ElicitationBroker,
     hitl_broker: HitlBroker,
     tool_policies: Arc<RwLock<Vec<ToolPolicyRecord>>>,
+    worktree_path_guard: Arc<RwLock<bool>>,
     mcp_pool: Arc<McpPool>,
-    mcp_servers: McpServerRepo,
+    filesystem_mcp: Arc<FilesystemMcpCoordinator>,
     run_streams: RunStreamRegistry,
     tmp_dir: PathBuf,
     meta: SessionMetaRepo,
     artifacts: Arc<ArtifactStore>,
     adk_skills: Arc<AdkSkillManager>,
+    sub_agent_runs: SubAgentRunRepo,
+    sub_agent_coordinator: SubAgentCoordinator,
 }
 
 impl MacoHarness {
@@ -86,13 +96,16 @@ impl MacoHarness {
         usage: UsageRepo,
         elicitation: ElicitationRepo,
         tool_policies: Vec<ToolPolicyRecord>,
+        worktree_path_guard: bool,
         mcp_pool: Arc<McpPool>,
-        mcp_servers: McpServerRepo,
+        filesystem_mcp: Arc<FilesystemMcpCoordinator>,
+        elicitation_broker: ElicitationBroker,
         run_streams: RunStreamRegistry,
         tmp_dir: PathBuf,
         meta: SessionMetaRepo,
         artifacts: Arc<ArtifactStore>,
         adk_skills: Arc<AdkSkillManager>,
+        sub_agent_runs: SubAgentRunRepo,
     ) -> Self {
         Self {
             storage,
@@ -101,24 +114,20 @@ impl MacoHarness {
             callback_logs,
             usage,
             elicitation,
-            elicitation_broker: ElicitationBroker::new(),
+            elicitation_broker,
             hitl_broker: HitlBroker::new(),
             tool_policies: Arc::new(RwLock::new(tool_policies)),
+            worktree_path_guard: Arc::new(RwLock::new(worktree_path_guard)),
             mcp_pool,
-            mcp_servers,
+            filesystem_mcp,
             run_streams,
             tmp_dir,
             meta,
             artifacts,
             adk_skills,
+            sub_agent_runs,
+            sub_agent_coordinator: SubAgentCoordinator::new(),
         }
-    }
-
-    async fn sync_filesystem_mcp(&self) -> MacoResult<()> {
-        if rebuild_filesystem_mcp_roots(&self.mcp_servers, &self.meta, &self.tmp_dir).await? {
-            self.mcp_pool.reload().await?;
-        }
-        Ok(())
     }
 
     pub fn adk_skills(&self) -> &Arc<AdkSkillManager> {
@@ -162,7 +171,6 @@ impl MacoHarness {
             rec.git_worktree_enabled != 0,
             &rec.git_branch_prefix,
         )?;
-        let mut mcp_dirty = false;
         if let Some(ref workspace) = ws {
             if workspace.uses_worktree {
                 let branch = workspace.worktree_branch.as_deref().unwrap_or("");
@@ -173,15 +181,8 @@ impl MacoHarness {
                         branch,
                     )
                     .await?;
-                mcp_dirty = true;
             } else {
                 self.meta.clear_worktree_state(session_id).await?;
-                mcp_dirty = rec.git_worktree_path.is_some();
-            }
-        }
-        if mcp_dirty {
-            if let Err(e) = self.sync_filesystem_mcp().await {
-                tracing::warn!("sync filesystem mcp after worktree provision: {e}");
             }
         }
         Ok(ws)
@@ -200,6 +201,14 @@ impl MacoHarness {
     /// 热更新 HITL 工具策略（影响后续新 Run）。
     pub async fn set_tool_policies(&self, policies: Vec<ToolPolicyRecord>) {
         *self.tool_policies.write().await = policies;
+    }
+
+    pub async fn worktree_path_guard_enabled(&self) -> bool {
+        *self.worktree_path_guard.read().await
+    }
+
+    pub async fn set_worktree_path_guard(&self, enabled: bool) {
+        *self.worktree_path_guard.write().await = enabled;
     }
 
     pub fn elicitation_broker(&self) -> &ElicitationBroker {
@@ -251,11 +260,76 @@ impl MacoHarness {
 
     /// 中断会话上活跃的 Runner，并将 Run 标为 cancelled。
     pub async fn interrupt_session(&self, session_id: &str) -> MacoResult<Option<String>> {
+        if let Some(run_id) = self.run_streams.active_run_id(session_id).await {
+            self.cascade_cancel_sub_agents(session_id, &run_id).await?;
+        }
         let Some(run_id) = self.run_streams.interrupt(session_id).await else {
             return Ok(None);
         };
+        self.hitl_broker.cancel(&run_id).await;
+        if let Ok(pending) = self.elicitation.list_pending_for_run(&run_id).await {
+            for rec in pending {
+                self.elicitation_broker.cancel(&rec.id).await;
+                let _ = self.elicitation.mark_expired(&rec.id).await;
+            }
+        }
+        let _ = self.filesystem_mcp.force_end_session_scope(session_id).await;
         self.orchestrator.cancel_run(&run_id).await?;
         Ok(Some(run_id))
+    }
+
+    /// 取消指定 parent run 下正在执行的子 Agent。
+    pub async fn cancel_sub_agent(
+        &self,
+        session_id: &str,
+        parent_run_id: &str,
+        task_key: &str,
+    ) -> MacoResult<bool> {
+        let task_key = sanitize_task_key(task_key);
+        if let Some((tk, _)) = self
+            .sub_agent_coordinator
+            .cancel(parent_run_id, &task_key)
+            .await
+        {
+            emit_sub_agent_cancelled(
+                &self.run_streams,
+                &self.orchestrator,
+                session_id,
+                parent_run_id,
+                &tk,
+                "user_cancel",
+            )
+            .await;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn cascade_cancel_sub_agents(
+        &self,
+        session_id: &str,
+        parent_run_id: &str,
+    ) -> MacoResult<()> {
+        if let Some((task_key, _)) = self
+            .sub_agent_coordinator
+            .cancel_all_for_run(parent_run_id)
+            .await
+        {
+            emit_sub_agent_cancelled(
+                &self.run_streams,
+                &self.orchestrator,
+                session_id,
+                parent_run_id,
+                &task_key,
+                "parent_run_interrupted",
+            )
+            .await;
+        }
+        Ok(())
+    }
+
+    pub fn sub_agent_runs(&self) -> &SubAgentRunRepo {
+        &self.sub_agent_runs
     }
 
     pub fn orchestrator(&self) -> &RunOrchestrator {
@@ -264,6 +338,17 @@ impl MacoHarness {
 
     pub fn storage(&self) -> &AdkStorage {
         &self.storage
+    }
+
+    fn filesystem_allowed_roots(
+        scratch_dir: &std::path::Path,
+        workspace: Option<&SessionWorkspace>,
+    ) -> Vec<String> {
+        let mut roots = vec![scratch_dir.to_string_lossy().into_owned()];
+        if let Some(ws) = workspace {
+            roots.push(ws.workspace_root.to_string_lossy().into_owned());
+        }
+        roots
     }
 
     fn build_instruction(
@@ -297,7 +382,8 @@ impl MacoHarness {
                      Repository root (do NOT edit directly): `{repo}`\n\
                      - All code changes MUST stay inside the worktree workspace directory.\n\
                      - bash starts in the worktree; relative paths resolve there.\n\
-                     - Never modify files in the main repository checkout.\n",
+                     - Never modify files in the main repository checkout.\n\
+                     - Custom MCP tools with file path arguments are also blocked from targeting the main repository.\n",
                     wt = ws.workspace_root.display(),
                     repo = ws.repo_root.display(),
                 ));
@@ -318,6 +404,7 @@ impl MacoHarness {
             "\nRelevant skills from `.skills/`, `.claude/skills/`, or `~/.maco/skills/` \
              are resolved via ADK ContextCoordinator; `allowed-tools` in frontmatter bind only those tools.\n",
         );
+        instruction.push_str(spawn_sub_agent_instruction_block());
         instruction
     }
 
@@ -394,20 +481,33 @@ impl MacoHarness {
     ) -> MacoResult<serde_json::Value> {
         let scratch_dir = ensure_session_workspace(&self.tmp_dir, session_id)?;
         let workspace = self.session_workspace(session_id).await?;
-        if pending.name == "bash" {
-            let tool = MacoBashTool::new(scratch_dir, workspace);
-            return tool
-                .execute(
-                    Arc::new(SimpleToolContext::new(&pending.call_id)),
-                    pending.args.clone(),
-                )
-                .await
-                .map_err(|e| MacoError::Adk(e.to_string()));
-        }
-        Err(MacoError::conflict(format!(
-            "cannot execute tool `{}` after reconnect; start a new message",
-            pending.name
-        )))
+        let roots = Self::filesystem_allowed_roots(&scratch_dir, workspace.as_ref());
+        let session_fs = self
+            .filesystem_mcp
+            .acquire_for_session(session_id, &roots)
+            .await?;
+        let mut mcp_toolsets = vec![session_fs.toolset()];
+        mcp_toolsets.extend(self.mcp_pool.toolsets().await);
+        let worktree_path_guard = self.worktree_path_guard_enabled().await;
+        let react_tools = ReactTools::new(self.react.clone());
+        let bash_tool: Arc<dyn Tool> = Arc::new(MacoBashTool::new(
+            scratch_dir,
+            workspace,
+            worktree_path_guard,
+        ));
+        let registry = MacoToolRegistry::build(&react_tools, bash_tool, &mcp_toolsets).await?;
+        let tool = registry
+            .resolve(&pending.name)
+            .ok_or_else(|| MacoError::conflict(format!(
+                "tool `{}` is not available after reconnect",
+                pending.name
+            )))?;
+        tool.execute(
+            Arc::new(SimpleToolContext::new(&pending.call_id)),
+            pending.args.clone(),
+        )
+        .await
+        .map_err(|e| MacoError::Adk(e.to_string()))
     }
 
     async fn run_with_content(
@@ -427,16 +527,24 @@ impl MacoHarness {
         };
         let scratch_dir = ensure_session_workspace(&self.tmp_dir, session_id)?;
         let workspace = self.session_workspace(session_id).await?;
-        let skill_root = workspace.as_ref().map(|ws| ws.repo_root.as_path());
+        let roots = Self::filesystem_allowed_roots(&scratch_dir, workspace.as_ref());
+        let session_fs = self
+            .filesystem_mcp
+            .acquire_for_session(session_id, &roots)
+            .await?;
+        let mut mcp_toolsets = vec![session_fs.toolset()];
+        mcp_toolsets.extend(self.mcp_pool.toolsets().await);
+        let skill_root = workspace.as_ref().map(|ws| ws.workspace_root.as_path());
         if let Err(e) = self.adk_skills.reload_from_disk(skill_root) {
             tracing::warn!("reload adk skills: {e}");
         }
         let skill_index = self.adk_skills.agent_index();
-        let mcp_toolsets = self.mcp_pool.toolsets().await;
+        let worktree_path_guard = self.worktree_path_guard_enabled().await;
         let react_tools = ReactTools::new(self.react.clone());
         let bash_tool: Arc<dyn Tool> = Arc::new(MacoBashTool::new(
             scratch_dir.clone(),
             workspace.clone(),
+            worktree_path_guard,
         ));
         let tool_registry = Arc::new(
             MacoToolRegistry::build(&react_tools, bash_tool.clone(), &mcp_toolsets).await?,
@@ -463,7 +571,8 @@ impl MacoHarness {
             })
             .await;
 
-        let llm = build_llm(model)?;
+        let llm = build_llm_for_run(model, Some(session_id), Some(&run_id))?;
+        let max_output_tokens = max_tokens_for_model(model) as i32;
         let compaction_opts = compaction_enabled().then(|| runner_compaction_options(llm.clone()));
         let logger = MacoCallbackLogger::new(
             self.callback_logs.clone(),
@@ -504,6 +613,13 @@ impl MacoHarness {
             streams: streams.clone(),
             orchestrator: self.orchestrator.clone(),
         });
+        let model_activity = Arc::new(ModelActivityState::new(
+            session_id.to_string(),
+            run_id.clone(),
+            tx.clone(),
+            streams.clone(),
+            self.orchestrator.clone(),
+        ));
 
         let mut instruction = self.build_instruction(&scratch_dir, workspace.as_ref());
         if let Some(ref skill_ctx) = skill_context {
@@ -511,17 +627,57 @@ impl MacoHarness {
             instruction.push_str(&skill_ctx.system_instruction);
         }
 
+        let sub_agent_parent_bridge = SubAgentParentBridge::new();
+
+        let sub_agent_ctx = SubAgentRunContext::new(
+            session_id.to_string(),
+            run_id.clone(),
+            Arc::clone(&llm),
+            max_output_tokens,
+            scratch_dir.clone(),
+            workspace.clone(),
+            worktree_path_guard,
+            bash_tool.clone(),
+            mcp_toolsets.clone(),
+            self.react.clone(),
+            self.storage.session_service(),
+            self.storage.memory_service(),
+            Arc::clone(&logger),
+            Arc::clone(&hitl),
+            Some(Arc::clone(&usage_ctx)),
+            streams.clone(),
+            tx.clone(),
+            self.orchestrator.clone(),
+            self.sub_agent_runs.clone(),
+            model.id.clone(),
+            self.sub_agent_coordinator.clone(),
+            sub_agent_parent_bridge.clone(),
+        );
+
         let mut builder = LlmAgentBuilder::new("maco")
             .description("maco personal agent")
             .instruction(instruction)
             .model(llm)
+            .max_output_tokens(max_output_tokens)
             .input_guardrails(agent_guardrails())
             .output_guardrails(agent_guardrails())
             .before_callback(before_agent(Arc::clone(&logger)))
             .after_callback(after_agent(Arc::clone(&logger)))
-            .before_model_callback(before_model(Arc::clone(&logger)))
-            .after_model_callback(after_model(Arc::clone(&logger), Some(usage_ctx)))
-            .before_tool_callback(before_tool_with_hitl(Arc::clone(&logger), hitl))
+            .before_model_callback(before_model_with_activity(
+                Arc::clone(&logger),
+                Arc::clone(&model_activity),
+            ))
+            .after_model_callback(after_model_with_activity(
+                Arc::clone(&logger),
+                Some(usage_ctx.clone()),
+                Arc::clone(&model_activity),
+            ))
+            .before_tool_callback(before_tool_with_hitl(
+                Arc::clone(&logger),
+                hitl,
+                workspace.clone(),
+                worktree_path_guard,
+            ))
             .after_tool_callback(after_tool_with_artifacts(
                 Arc::clone(&logger),
                 artifact_capture,
@@ -540,6 +696,7 @@ impl MacoHarness {
             for tool in react_tools.as_tool_arcs() {
                 builder = builder.tool(tool);
             }
+            builder = builder.tool(sub_agent_ctx.spawn_tool());
             builder = builder.tool(bash_tool);
             for ts in mcp_toolsets {
                 builder = builder.toolset(ts);
@@ -602,9 +759,12 @@ impl MacoHarness {
         let orchestrator = self.orchestrator.clone();
         let session_id_task = session_id.to_string();
         let streams_task = self.run_streams.clone();
+        let filesystem_mcp_task = self.filesystem_mcp.clone();
         tokio::spawn(async move {
+            let _session_fs = session_fs;
             let run_id = run_id_for_task;
             let mut ok = true;
+            let mut awaiting_user = false;
             let mut last_emitted_text = String::new();
             while let Some(item) = stream.next().await {
                 match item {
@@ -669,7 +829,6 @@ impl MacoHarness {
                 }
             }
             if ok {
-                let mut awaiting_user = false;
                 if let Ok(current) = orchestrator.get_run(&run_id).await {
                     if let Some(r) = current {
                         awaiting_user = r.status == RUN_STATUS_AWAITING_USER;
@@ -708,6 +867,9 @@ impl MacoHarness {
                     }
                 }
             }
+            if !awaiting_user {
+                filesystem_mcp_task.release_session(&session_id_task).await;
+            }
             streams_task.unregister(&session_id_task).await;
         });
 
@@ -732,14 +894,6 @@ fn user_text_content(user_text: &str) -> Content {
             text: user_text.to_string(),
         }],
     }
-}
-
-fn agent_guardrails() -> GuardrailSet {
-    let mut set = GuardrailSet::new();
-    if pii_guardrail_enabled() {
-        set = set.with(PiiRedactor::new());
-    }
-    set
 }
 
 fn compute_text_delta(last_emitted: &mut String, text: &str) -> String {

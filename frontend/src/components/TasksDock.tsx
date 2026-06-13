@@ -4,10 +4,12 @@ import ReactMarkdown from "react-markdown";
 import { downloadArtifact } from "../api/client";
 import { MacoIcon, type MacoIconName } from "./Icons";
 import { ArtifactPreviewContent } from "./ArtifactPreviewContent";
+import { SubAgentLane } from "./SubAgentLane";
 import { MARKDOWN_COMPONENTS, MARKDOWN_REMARK_PLUGINS } from "./markdownComponents";
 import { TasksDockSkeleton } from "./TasksDockSkeleton";
 import { normalizeAssistantMarkdown } from "../utils/normalizeMarkdown";
 import { extractPlanTitle, stripPlanChecklist } from "../utils/planMarkdown";
+import type { SubAgentActivityMap } from "../types/subAgentActivity";
 
 type Todo = { task_key: string; title: string; status: string };
 
@@ -24,6 +26,7 @@ type Props = {
   artifacts: Artifact[];
   sessionId: string | null;
   busy?: boolean;
+  subAgentActivity?: SubAgentActivityMap;
 };
 
 type TodoTone = "pending" | "in_progress" | "completed";
@@ -69,7 +72,14 @@ function PanelEmpty({ icon, children }: { icon: MacoIconName; children: string }
   );
 }
 
-export function TasksDock({ plan, todos, artifacts, sessionId, busy = false }: Props) {
+export function TasksDock({
+  plan,
+  todos,
+  artifacts,
+  sessionId,
+  busy = false,
+  subAgentActivity = {},
+}: Props) {
   const [planOpen, setPlanOpen] = useState(false);
   const [previewArtifactId, setPreviewArtifactId] = useState<string | null>(null);
 
@@ -183,6 +193,10 @@ export function TasksDock({ plan, todos, artifacts, sessionId, busy = false }: P
                           <span className={`todo-step-status todo-step-status--${meta.tone}`}>
                             {meta.label}
                           </span>
+                          <SubAgentLane
+                            inProgress={meta.tone === "in_progress"}
+                            activity={subAgentActivity[t.task_key]}
+                          />
                         </div>
                       </li>
                     );

@@ -5,16 +5,20 @@ pub mod artifact_capture;
 pub mod compaction;
 pub mod callbacks;
 pub mod elicitation;
+pub mod filesystem_mcp;
+pub mod force_unary_llm;
 pub mod harness;
 pub mod hitl;
 pub mod mcp_pool;
 pub mod run_stream;
+pub mod model_activity;
 pub mod model_factory;
-pub use model_factory::{validate_provider, SUPPORTED_PROVIDERS};
+pub use model_factory::{max_tokens_for_model, validate_provider, DEFAULT_MAX_TOKENS, SUPPORTED_PROVIDERS};
 pub mod orchestrator;
 pub mod shell;
 pub mod skill_coordinator;
 pub mod skill_install;
+pub mod sub_agent;
 pub mod tool_concurrency;
 pub mod usage;
 
@@ -22,6 +26,7 @@ pub use elicitation::{
     DynamicElicitationHandler, ElicitationBroker, ElicitationRespondBody, ElicitationRunContext,
     MacoElicitationHandler,
 };
+pub use filesystem_mcp::FilesystemMcpCoordinator;
 pub use harness::{MacoHarness, ResumeHitlOutcome};
 pub use hitl::HitlBroker;
 pub use run_stream::RunStreamRegistry;

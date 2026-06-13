@@ -245,10 +245,23 @@ impl ReactRepo {
             if todo.status == status {
                 continue;
             }
+            // plan 可能滞后于 upsert_todo；禁止用未勾选 checkbox 覆盖更高进度。
+            if todo_status_rank(&status) <= todo_status_rank(&todo.status) {
+                continue;
+            }
             self.patch_todo_status(session_id, &todo.task_key, &status)
                 .await?;
         }
         Ok(())
+    }
+}
+
+/// 待办状态优先级（completed > in_progress > pending）。
+fn todo_status_rank(status: &str) -> u8 {
+    match normalize_todo_status(status).as_str() {
+        "completed" => 3,
+        "in_progress" => 2,
+        _ => 1,
     }
 }
 
@@ -377,5 +390,11 @@ mod tests {
         assert_eq!(normalize_todo_status("done"), "completed");
         assert_eq!(normalize_todo_status("doing"), "in_progress");
         assert_eq!(normalize_todo_status("pending"), "pending");
+    }
+
+    #[test]
+    fn todo_status_rank_orders_progress() {
+        assert!(todo_status_rank("completed") > todo_status_rank("in_progress"));
+        assert!(todo_status_rank("in_progress") > todo_status_rank("pending"));
     }
 }

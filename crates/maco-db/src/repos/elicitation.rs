@@ -98,6 +98,20 @@ impl ElicitationRepo {
         .map_err(|e| MacoError::database(e.to_string()))
     }
 
+    pub async fn list_pending_for_run(&self, run_id: &str) -> MacoResult<Vec<ElicitationRecord>> {
+        sqlx::query_as::<_, ElicitationRecord>(
+            "SELECT id, session_id, run_id, mcp_server, request_type, payload, response, status,
+                    expires_at, created_at, responded_at
+             FROM maco_elicitation_requests
+             WHERE run_id = ? AND status = 'pending'
+             ORDER BY created_at ASC",
+        )
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| MacoError::database(e.to_string()))
+    }
+
     pub async fn list_pending_for_session(
         &self,
         session_id: &str,

@@ -1,14 +1,16 @@
 //! HTTP API 路由与 handler 实现。
 
 use axum::{
-    extract::{Extension, Multipart, Path, State},
+    extract::{Extension, Multipart, Path, Query, State},
     http::{header, StatusCode},
     response::IntoResponse,
     routing::{delete, get, patch, post},
     Json, Router,
 };
 use maco_core::{pending_tools_from_resume, MacoError, RunStatusResponse};
-use maco_db::{payload_summary, JobRecord, McpServerRecord};
+use maco_db::{
+    payload_summary, FILESYSTEM_MCP_NAME, JobRecord, McpServerRecord, WORKTREE_PATH_GUARD_KEY,
+};
 use maco_harness::elicitation::{action_from_str, ElicitationRespondBody};
 use maco_governance::{
     generate_token, hash_token, pii_guardrail_enabled, scopes_json, SCOPE_ADMIN,
@@ -51,9 +53,23 @@ pub fn api_router() -> Router<AppState> {
         .route("/sessions/{id}/export", get(export_session))
         // Run 状态查询、HITL/Elicitation 恢复
         .route("/sessions/{id}/runs/active", get(get_active_run))
+        .route("/worktree/status", get(get_worktree_status))
+        .route("/sessions/{id}/worktree/provision", post(provision_session_worktree))
         .route("/sessions/{id}/runs/{run_id}", get(get_run))
         .route("/sessions/{id}/runs/{run_id}/stream", get(stream_run))
         .route("/sessions/{id}/runs/{run_id}/resume", post(resume_run))
+        .route(
+            "/sessions/{id}/sub-agent-runs",
+            get(list_sub_agent_runs),
+        )
+        .route(
+            "/sessions/{id}/sub-agent-runs/{sub_run_id}",
+            get(get_sub_agent_run),
+        )
+        .route(
+            "/sessions/{id}/runs/{run_id}/sub-agents/{task_key}/cancel",
+            post(cancel_sub_agent),
+        )
         .route("/sessions/{id}/elicitation/pending", get(list_pending_elicitation))
         .route("/elicitation/{id}/respond", post(respond_elicitation))
         // 模型配置
@@ -75,6 +91,10 @@ pub fn api_router() -> Router<AppState> {
             get(list_tool_policies).post(create_tool_policy),
         )
         .route("/tool-policies/reload", post(reload_tool_policies))
+        .route(
+            "/tool-policies/worktree-guard",
+            get(get_worktree_path_guard).patch(update_worktree_path_guard),
+        )
         .route(
             "/tool-policies/{id}",
             patch(update_tool_policy).delete(delete_tool_policy),
@@ -113,11 +133,12 @@ async fn pick_directory() -> Result<Json<serde_json::Value>, ApiError> {
     }
 }
 
-/// `GET /guardrail/status` — 返回 PII 脱敏与日志脱敏配置状态。
-async fn guardrail_status() -> Json<serde_json::Value> {
+/// `GET /guardrail/status` — 返回 PII 脱敏、日志脱敏与 worktree 路径守卫配置。
+async fn guardrail_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "pii_enabled": pii_guardrail_enabled(),
         "log_redact": std::env::var("MACO_LOG_REDACT").unwrap_or_else(|_| "basic".into()),
+        "worktree_path_guard": state.harness.worktree_path_guard_enabled().await,
     }))
 }
 
@@ -131,6 +152,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "skills": state.adk_skills.enabled_count(),
         "skills_total": state.adk_skills.total_count(),
         "bind": state.bind_addr,
+        "tmp_dir": state.tmp_dir.to_string_lossy(),
     }))
 }
 
@@ -179,11 +201,6 @@ async fn create_session(
             body.git_branch_prefix,
         )
         .await?;
-    if rec.project_root.is_some() {
-        if let Err(e) = state.sync_filesystem_mcp().await {
-            tracing::warn!("sync filesystem mcp after create session: {e}");
-        }
-    }
     Ok(Json(crate::session_meta_view::SessionMetaView::from_record(rec)))
 }
 
@@ -234,9 +251,7 @@ async fn update_session(
             Some(pr.as_str())
         };
         state.facade.set_project_root(&id, raw).await?;
-        if let Err(e) = state.sync_filesystem_mcp().await {
-            tracing::warn!("sync filesystem mcp after update project_root: {e}");
-        }
+        state.invalidate_session_filesystem_cache(&id).await;
     }
     if let Some(mode) = body.permission_mode.as_deref() {
         state
@@ -259,9 +274,7 @@ async fn update_session(
             .facade
             .set_git_worktree_settings(&id, enabled, prefix)
             .await?;
-        if let Err(e) = state.sync_filesystem_mcp().await {
-            tracing::warn!("sync filesystem mcp after git worktree settings: {e}");
-        }
+        state.invalidate_session_filesystem_cache(&id).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -271,10 +284,8 @@ async fn delete_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    state.invalidate_session_filesystem_cache(&id).await;
     state.facade.delete_session(&id).await?;
-    if let Err(e) = state.sync_filesystem_mcp().await {
-        tracing::warn!("sync filesystem mcp after delete session: {e}");
-    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -364,16 +375,72 @@ async fn interrupt_chat(
     })))
 }
 
-/// `GET /sessions/{id}/runs/active` — 查询会话当前活跃 Run ID（用于 SSE 重连）。
+/// `GET /sessions/{id}/runs/active` — 查询会话当前活跃 Run（内存流优先，否则查 DB）。
 async fn get_active_run(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let run_id = state.harness.run_streams().active_run_id(&session_id).await;
+    if let Some(run_id) = state.harness.run_streams().active_run_id(&session_id).await {
+        return Ok(Json(serde_json::json!({
+            "session_id": session_id,
+            "run_id": run_id,
+            "source": "stream",
+        })));
+    }
+
+    if let Some(run) = state.runs.find_active_for_session(&session_id).await? {
+        return Ok(Json(serde_json::json!({
+            "session_id": session_id,
+            "run_id": run.id,
+            "status": run.status,
+            "source": "db",
+        })));
+    }
+
     Ok(Json(serde_json::json!({
         "session_id": session_id,
-        "run_id": run_id,
+        "run_id": null,
     })))
+}
+
+/// `GET /worktree/status` 查询参数。
+#[derive(Deserialize)]
+struct WorktreeStatusQuery {
+    /// 项目根目录（绝对路径）。
+    project_root: String,
+    /// 是否启用 worktree（`1`/`0` 或 `true`/`false`），默认 `true`。
+    enabled: Option<String>,
+}
+
+/// `GET /worktree/status` — 探测项目路径的 Git worktree 状态（无需会话）。
+async fn get_worktree_status(
+    axum::extract::Query(q): axum::extract::Query<WorktreeStatusQuery>,
+) -> Json<serde_json::Value> {
+    let enabled = match q.enabled.as_deref().map(str::trim) {
+        Some("0") | Some("false") | Some("off") => false,
+        _ => true,
+    };
+    let status = maco_core::git_worktree_status(
+        enabled,
+        Some(q.project_root.as_str()),
+        None,
+    );
+    Json(serde_json::json!({ "status": status }))
+}
+
+/// `POST /sessions/{id}/worktree/provision` — 手动重试 Git worktree provision。
+async fn provision_session_worktree(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<crate::session_meta_view::SessionMetaView>, ApiError> {
+    state.facade.provision_worktree(&session_id).await?;
+    state.invalidate_session_filesystem_cache(&session_id).await;
+    let rec = state
+        .meta
+        .get(&session_id)
+        .await?
+        .ok_or_else(|| MacoError::not_found("session"))?;
+    Ok(Json(crate::session_meta_view::SessionMetaView::from_record(rec)))
 }
 
 /// `GET /sessions/{id}/runs/{run_id}/stream` — 订阅活跃 Run 的 SSE 广播（断线重连）。
@@ -421,7 +488,7 @@ async fn get_run(
     if run.session_id != session_id {
         return Err(MacoError::not_found("run").into());
     }
-    let pending_elicitations = load_pending_elicitations(&state, &session_id).await?;
+    let pending_elicitations = load_pending_elicitations_for_run(&state, &run_id).await?;
 
     Ok(Json(RunStatusResponse {
         id: run.id,
@@ -432,6 +499,57 @@ async fn get_run(
         pending_elicitations,
         error_message: run.error_message,
     }))
+}
+
+/// `GET /sessions/{id}/sub-agent-runs` 查询参数。
+#[derive(Deserialize)]
+struct ListSubAgentRunsQuery {
+    task_key: Option<String>,
+    limit: Option<u32>,
+}
+
+/// `GET /sessions/{id}/sub-agent-runs` — 子 Agent spawn 审计列表。
+async fn list_sub_agent_runs(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(q): Query<ListSubAgentRunsQuery>,
+) -> Result<Json<Vec<maco_db::SubAgentRunRecord>>, ApiError> {
+    let limit = q.limit.unwrap_or(50);
+    let task_key = q.task_key.as_deref();
+    Ok(Json(
+        state
+            .sub_agent_runs
+            .list_for_session(&session_id, task_key, limit)
+            .await?,
+    ))
+}
+
+/// `GET /sessions/{id}/sub-agent-runs/{sub_run_id}` — 单条子 Agent 审计详情。
+async fn get_sub_agent_run(
+    State(state): State<AppState>,
+    Path((session_id, sub_run_id)): Path<(String, String)>,
+) -> Result<Json<maco_db::SubAgentRunRecord>, ApiError> {
+    let rec = state
+        .sub_agent_runs
+        .get(&sub_run_id)
+        .await?
+        .ok_or_else(|| MacoError::not_found("sub_agent_run"))?;
+    if rec.session_id != session_id {
+        return Err(MacoError::not_found("sub_agent_run").into());
+    }
+    Ok(Json(rec))
+}
+
+/// `POST /sessions/{id}/runs/{run_id}/sub-agents/{task_key}/cancel` — 取消活跃子 Agent。
+async fn cancel_sub_agent(
+    State(state): State<AppState>,
+    Path((session_id, run_id, task_key)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let cancelled = state
+        .harness
+        .cancel_sub_agent(&session_id, &run_id, &task_key)
+        .await?;
+    Ok(Json(serde_json::json!({ "cancelled": cancelled })))
 }
 
 /// 从 DB 加载会话下所有 pending 状态的 Elicitation 摘要。
@@ -446,11 +564,23 @@ async fn load_pending_elicitations(
     Ok(records.iter().map(payload_summary).collect())
 }
 
-/// `GET /sessions/{id}/elicitation/pending` — 列出会话待处理的 Elicitation。
+/// 从 DB 加载指定 Run 的 pending Elicitation（避免历史残留干扰重连）。
+async fn load_pending_elicitations_for_run(
+    state: &AppState,
+    run_id: &str,
+) -> Result<Vec<maco_core::PendingElicitation>, ApiError> {
+    let records = state.elicitation.list_pending_for_run(run_id).await?;
+    Ok(records.iter().map(payload_summary).collect())
+}
+
+/// `GET /sessions/{id}/elicitation/pending` — 列出待处理 Elicitation（优先按活跃 Run 过滤）。
 async fn list_pending_elicitation(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<maco_core::PendingElicitation>>, ApiError> {
+    if let Some(run) = state.runs.find_active_for_session(&session_id).await? {
+        return Ok(Json(load_pending_elicitations_for_run(&state, &run.id).await?));
+    }
     Ok(Json(load_pending_elicitations(&state, &session_id).await?))
 }
 
@@ -565,17 +695,11 @@ async fn put_plan(
     ))
 }
 
-/// `GET /sessions/{id}/todos` — 列出会话下所有 Todo 项。
+/// `GET /sessions/{id}/todos` — 列出会话下所有 Todo 项（只读；plan 同步仅在 `update_plan` 时触发）。
 async fn list_todos(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<maco_db::TodoRecord>>, ApiError> {
-    if let Some(plan) = state.react.get_plan(&id).await? {
-        state
-            .react
-            .sync_todo_status_from_plan(&id, &plan.content)
-            .await?;
-    }
     Ok(Json(state.react.list_todos(&id).await?))
 }
 
@@ -1209,6 +1333,12 @@ async fn create_mcp_server(
     Json(body): Json<McpServerUpsertBody>,
 ) -> Result<Json<McpServerRecord>, ApiError> {
     validate_mcp_body(&body)?;
+    if body.name.trim() == FILESYSTEM_MCP_NAME {
+        return Err(MacoError::config(
+            "built-in filesystem MCP is managed by maco; cannot create manually",
+        )
+        .into());
+    }
     let args = body.args.unwrap_or_else(|| "[]".into());
     let env = body.env.unwrap_or_else(|| "{}".into());
     let rec = state
@@ -1222,7 +1352,7 @@ async fn create_mcp_server(
             &env,
         )
         .await?;
-    if let Err(e) = state.mcp_pool.reload().await {
+    if let Err(e) = state.reload_mcp_pool_guarded().await {
         tracing::warn!("mcp reload after create: {e}");
     }
     Ok(Json(rec))
@@ -1240,6 +1370,26 @@ async fn update_mcp_server(
         .get(&id)
         .await?
         .ok_or_else(|| MacoError::not_found("mcp server"))?;
+    if existing.name == FILESYSTEM_MCP_NAME {
+        if body.name.trim() != FILESYSTEM_MCP_NAME {
+            return Err(MacoError::config("built-in filesystem MCP cannot be renamed").into());
+        }
+        if body.transport.trim() != existing.transport {
+            return Err(MacoError::config(
+                "built-in filesystem MCP transport cannot be changed",
+            )
+            .into());
+        }
+        if body.args.is_some() && body.args.as_ref() != Some(&existing.args) {
+            return Err(MacoError::config(
+                "filesystem MCP allowed roots are managed per-run by maco",
+            )
+            .into());
+        }
+        if body.url.is_some() {
+            return Err(MacoError::config("built-in filesystem MCP does not use url").into());
+        }
+    }
     let args = body.args.unwrap_or(existing.args);
     let env = body.env.unwrap_or(existing.env);
     let enabled = body.enabled.unwrap_or(existing.enabled != 0);
@@ -1256,7 +1406,7 @@ async fn update_mcp_server(
             enabled,
         )
         .await?;
-    if let Err(e) = state.mcp_pool.reload().await {
+    if let Err(e) = state.reload_mcp_pool_guarded().await {
         tracing::warn!("mcp reload after update: {e}");
     }
     state
@@ -1273,10 +1423,18 @@ async fn delete_mcp_server(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let existing = state
+        .mcp_servers
+        .get(&id)
+        .await?
+        .ok_or_else(|| MacoError::not_found("mcp server"))?;
+    if existing.name == FILESYSTEM_MCP_NAME {
+        return Err(MacoError::config("built-in filesystem MCP cannot be deleted").into());
+    }
     if !state.mcp_servers.delete(&id).await? {
         return Err(MacoError::not_found("mcp server").into());
     }
-    if let Err(e) = state.mcp_pool.reload().await {
+    if let Err(e) = state.reload_mcp_pool_guarded().await {
         tracing::warn!("mcp reload after delete: {e}");
     }
     Ok(StatusCode::NO_CONTENT)
@@ -1284,7 +1442,7 @@ async fn delete_mcp_server(
 
 /// `POST /mcp/reload` — 从 DB 重载 MCP 连接池。
 async fn reload_mcp_pool(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    state.mcp_pool.reload().await?;
+    state.reload_mcp_pool_guarded().await?;
     let names = state.mcp_pool.status_summary().await;
     Ok(Json(serde_json::json!({ "reloaded": true, "servers": names })))
 }
@@ -1359,6 +1517,31 @@ async fn list_tool_policies(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<maco_db::ToolPolicyRecord>>, ApiError> {
     Ok(Json(state.tool_policies.list().await?))
+}
+
+/// `GET /tool-policies/worktree-guard` — worktree 主仓库路径拦截开关。
+async fn get_worktree_path_guard(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(serde_json::json!({
+        "enabled": state.harness.worktree_path_guard_enabled().await,
+    })))
+}
+
+#[derive(Deserialize)]
+struct WorktreePathGuardBody {
+    enabled: bool,
+}
+
+/// `PATCH /tool-policies/worktree-guard` — 更新 worktree 路径拦截并热更新 Harness。
+async fn update_worktree_path_guard(
+    State(state): State<AppState>,
+    Json(body): Json<WorktreePathGuardBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let value = if body.enabled { "true" } else { "false" };
+    state.settings.set(WORKTREE_PATH_GUARD_KEY, value).await?;
+    state.harness.set_worktree_path_guard(body.enabled).await;
+    Ok(Json(serde_json::json!({ "enabled": body.enabled })))
 }
 
 /// `POST /tool-policies` — 新增策略并热更新 Harness。

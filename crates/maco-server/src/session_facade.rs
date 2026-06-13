@@ -79,20 +79,13 @@ impl SessionFacade {
             return Err(e);
         }
         if let Err(e) = self.provision_worktree(&session_id).await {
+            tracing::warn!(
+                "provision worktree on create session {session_id}: {e}; session kept without worktree"
+            );
             if let Ok(Some(rec)) = self.meta.get(&session_id).await {
                 Self::cleanup_worktree(&rec, &session_id);
             }
-            let _ = self.meta.delete_hard(&session_id).await;
-            let _ = self
-                .adk
-                .session
-                .delete(DeleteRequest {
-                    app_name: APP_NAME.into(),
-                    user_id: USER_ID.into(),
-                    session_id,
-                })
-                .await;
-            return Err(e);
+            let _ = self.meta.clear_worktree_state(&session_id).await;
         }
         self.meta
             .get(&session_id)

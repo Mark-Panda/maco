@@ -40,7 +40,11 @@ import {
   DEFAULT_GIT_BRANCH_PREFIX,
   deriveWorktreeStatus,
   friendlyWorktreeError,
+  isStreamAbortError,
   pickProjectDirectory,
+  probeGitWorktreeStatus,
+  provisionSessionWorktree,
+  type GitWorktreeStatus,
   respondElicitation,
   resumeRun,
   revokeApiToken,
@@ -66,6 +70,11 @@ import { GitWorktreeToolbarControl } from "./components/GitWorktreeToolbarContro
 import { SessionProjectBar } from "./components/SessionProjectBar";
 import { TasksDock } from "./components/TasksDock";
 import { useTasksDockWidth } from "./hooks/useTasksDockWidth";
+import {
+  pruneCompletedSubAgentActivity,
+  upsertSubAgentActivity,
+  type SubAgentActivityMap,
+} from "./types/subAgentActivity";
 import { SkillsPanel } from "./components/SkillsPanel";
 import { ToolPolicySettings } from "./components/ToolPolicySettings";
 import { useStreamingAssistantBuffer } from "./hooks/useStreamingAssistantBuffer";
@@ -81,6 +90,9 @@ type SseEvent = {
     tool_name?: string;
     name?: string;
     args?: Record<string, unknown>;
+    task_key?: string;
+    worker_agent?: string;
+    sub_agent?: boolean;
     elicitation_id?: string;
     request_type?: string;
     url?: string;
@@ -108,6 +120,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [plan, setPlan] = useState("");
   const [todos, setTodos] = useState<Array<{ task_key: string; title: string; status: string }>>([]);
+  const [subAgentActivity, setSubAgentActivity] = useState<SubAgentActivityMap>({});
   const [loading, setLoading] = useState(false);
   const [confirmSubmitting, setConfirmSubmitting] = useState(false);
   const [elicitationSubmitting, setElicitationSubmitting] = useState(false);
@@ -208,6 +221,9 @@ export default function App() {
   const [gitBranchPrefix, setGitBranchPrefix] = useState(getLastGitBranchPrefix);
   const [gitWorktreePath, setGitWorktreePath] = useState<string | null>(null);
   const [gitWorktreeBranch, setGitWorktreeBranch] = useState<string | null>(null);
+  const [draftWorktreeStatus, setDraftWorktreeStatus] = useState<GitWorktreeStatus | null>(
+    null,
+  );
   const [permissionMode, setPermissionMode] =
     useState<AgentPermissionMode>(getLastPermissionMode);
   const [pickingFolder, setPickingFolder] = useState(false);
@@ -215,10 +231,39 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatAbortRef = useRef<AbortController | null>(null);
   const sessionIdRef = useRef<string | null>(sessionId);
+  const activeRunIdRef = useRef<string | null>(null);
+  const lastSseAtRef = useRef(Date.now());
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
+
+  useEffect(() => {
+    activeRunIdRef.current = activeRunId;
+  }, [activeRunId]);
+
+  useEffect(() => {
+    if (sessionId) {
+      setDraftWorktreeStatus(null);
+      return;
+    }
+    const root = projectRootDraft.trim();
+    if (!root) {
+      setDraftWorktreeStatus(null);
+      return;
+    }
+    let cancelled = false;
+    probeGitWorktreeStatus(root, gitWorktreeEnabled)
+      .then((status) => {
+        if (!cancelled) setDraftWorktreeStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) setDraftWorktreeStatus(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, projectRootDraft, gitWorktreeEnabled]);
 
   const { width: tasksDockWidth, onResizeStart } = useTasksDockWidth();
   const defaultModel = models.find((m) => m.is_default) ?? models[0];
@@ -280,7 +325,55 @@ export default function App() {
       .catch(() => setJobs([]));
   }, [sessionId]);
 
+  async function reloadSessionMessages(sid: string) {
+    try {
+      const hist = await fetchSessionMessages(sid);
+      setMessages(
+        hist.messages.map((m) => ({
+          role: m.role === "user" ? "user" : "assistant",
+          content: m.content,
+        })),
+      );
+    } catch {
+      // 保留已有消息
+    }
+  }
+
+  async function finalizeRunState(sid: string, reloadMessages = false) {
+    flushAssistantStream();
+    setActiveRunId(null);
+    setLoading(false);
+    setAgentActivity(null);
+    setSubAgentActivity({});
+    setPendingConfirm(null);
+    setPendingElicitation(null);
+    await refreshTasks(sid).catch(() => undefined);
+    listArtifacts(sid).then(setArtifacts).catch(() => undefined);
+    if (reloadMessages) {
+      await reloadSessionMessages(sid);
+    }
+  }
+
+  useEffect(() => {
+    if (!loading || !sessionId) return;
+    const timer = window.setInterval(() => {
+      const sid = sessionIdRef.current;
+      if (!sid) return;
+      const staleMs = Date.now() - lastSseAtRef.current;
+      if (staleMs < 12000) return;
+      fetchActiveRun(sid)
+        .then((active) => {
+          if (!active.run_id && activeRunIdRef.current) {
+            finalizeRunState(sid, true).catch(() => undefined);
+          }
+        })
+        .catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [loading, sessionId]);
+
   function handleSse(raw: Record<string, unknown>) {
+    lastSseAtRef.current = Date.now();
     const ev = raw as SseEvent & { event_type?: string };
     const type = ev.type ?? ev.event_type;
     const activeSessionId = sessionIdRef.current;
@@ -288,10 +381,62 @@ export default function App() {
     if (type === "text" && ev.payload?.content) {
       appendChunk(ev.payload.content);
     }
+    if (type === "sub_agent_progress" && ev.payload?.content) {
+      const taskKey = String(ev.payload.task_key ?? "");
+      const worker = ev.payload.worker_agent as string | undefined;
+      const content = String(ev.payload.content);
+      if (taskKey) {
+        setSubAgentActivity((prev) =>
+          upsertSubAgentActivity(prev, taskKey, {
+            last_progress: content,
+            worker_agent: worker,
+          }),
+        );
+      }
+      const snippet = content.slice(0, 120);
+      setAgentActivity(`子任务 ${taskKey || "子任务"}：${snippet}`);
+    }
+    if (type === "sub_agent_cancelled") {
+      const taskKey = String(ev.payload?.task_key ?? "");
+      if (taskKey) {
+        setSubAgentActivity((prev) => {
+          const next = { ...prev };
+          delete next[taskKey];
+          return next;
+        });
+      }
+      setAgentActivity(`子任务 ${taskKey || "子任务"}已取消`);
+    }
+    if (type === "agent_activity" && ev.payload?.message) {
+      setAgentActivity(String(ev.payload.message));
+    }
     if (type === "tool_call") {
-      const toolName = ev.payload?.name ?? "unknown";
+      const toolName = String(ev.payload?.name ?? "unknown");
+      const subKey = ev.payload?.task_key as string | undefined;
+      const isSub = Boolean(ev.payload?.sub_agent);
       dropAssistantTurnBeforeTool();
-      setAgentActivity(`正在调用工具：${toolName}`);
+      if (!isSub && toolName === "spawn_sub_agent") {
+        const args = ev.payload?.args as Record<string, unknown> | undefined;
+        const tk = typeof args?.task_key === "string" ? args.task_key.trim() : "";
+        if (tk) {
+          setSubAgentActivity((prev) =>
+            upsertSubAgentActivity(prev, tk, {
+              started_at: Date.now(),
+              worker_agent: `worker-${tk}`,
+            }),
+          );
+        }
+      }
+      if (isSub && subKey) {
+        setSubAgentActivity((prev) =>
+          upsertSubAgentActivity(prev, subKey, { last_tool: toolName }),
+        );
+      }
+      setAgentActivity(
+        isSub && subKey
+          ? `子任务 ${subKey}：${toolName}`
+          : `正在调用工具：${toolName}`,
+      );
     }
     if (type === "tool_confirm_request" && ev.run_id && ev.payload?.tool_name) {
       dropAssistantTurnBeforeTool();
@@ -317,6 +462,7 @@ export default function App() {
       setLoading(false);
       setAgentActivity(null);
       setActiveRunId(null);
+      setSubAgentActivity({});
       setPendingConfirm(null);
       setPendingElicitation(null);
     }
@@ -340,15 +486,17 @@ export default function App() {
       setAgentActivity("等待你的确认…");
     }
     if (type === "done") {
-      flushAssistantStream();
-      setActiveRunId(null);
-      setLoading(false);
-      setAgentActivity(null);
-      setPendingConfirm(null);
       const sid = activeSessionId ?? sessionIdRef.current;
       if (sid) {
-        refreshTasks(sid).catch(() => undefined);
-        listArtifacts(sid).then(setArtifacts).catch(() => undefined);
+        finalizeRunState(sid, false).catch(() => undefined);
+      } else {
+        flushAssistantStream();
+        setActiveRunId(null);
+        setLoading(false);
+        setAgentActivity(null);
+        setSubAgentActivity({});
+        setPendingConfirm(null);
+        setPendingElicitation(null);
       }
     }
   }
@@ -376,12 +524,31 @@ export default function App() {
   async function refreshTasks(id: string) {
     const p = await fetchPlan(id);
     setPlan(p?.content ?? "");
-    setTodos(await fetchTodos(id));
+    const todoRows = await fetchTodos(id);
+    setTodos(todoRows);
+    setSubAgentActivity((prev) => pruneCompletedSubAgentActivity(prev, todoRows));
   }
 
   function applyWorktreeRuntimeFromSession(s: SessionMeta) {
     setGitWorktreePath(s.git_worktree_path);
     setGitWorktreeBranch(s.git_worktree_branch);
+  }
+
+  function applyGitWorktreeSettingsFromSession(s: SessionMeta) {
+    const enabled = (s.git_worktree_enabled ?? 1) !== 0;
+    const prefix = (s.git_branch_prefix || DEFAULT_GIT_BRANCH_PREFIX).trim();
+    setGitWorktreeEnabled(enabled);
+    setGitBranchPrefix(prefix);
+    setLastGitWorktreeEnabled(enabled);
+    setLastGitBranchPrefix(prefix);
+  }
+
+  function syncSessionsAndWorktreeState(rows: SessionMeta[]) {
+    setSessions(rows);
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    const current = rows.find((s) => s.session_id === sid);
+    if (current) applyWorktreeRuntimeFromSession(current);
   }
 
   async function loadSession(meta: SessionMeta) {
@@ -394,25 +561,10 @@ export default function App() {
     setPermissionMode(resolved);
     setLastPermissionMode(resolved);
     const full = sessions.find((s) => s.session_id === sid) ?? meta;
+    applyGitWorktreeSettingsFromSession(full);
     applyWorktreeRuntimeFromSession(full);
-    const sessionEnabled = (full.git_worktree_enabled ?? 1) !== 0;
-    const sessionPrefix = (full.git_branch_prefix || DEFAULT_GIT_BRANCH_PREFIX).trim();
-    const globalPrefix = (gitBranchPrefix || DEFAULT_GIT_BRANCH_PREFIX).trim();
-    if (sessionEnabled !== gitWorktreeEnabled || sessionPrefix !== globalPrefix) {
-      try {
-        await updateSession(sid, {
-          git_worktree_enabled: gitWorktreeEnabled,
-          git_branch_prefix: globalPrefix,
-        });
-        const rows = await listSessions();
-        setSessions(rows);
-        const synced = rows.find((s) => s.session_id === sid);
-        if (synced) applyWorktreeRuntimeFromSession(synced);
-      } catch {
-        // 全局偏好同步失败不阻断加载会话
-      }
-    }
     setActiveRunId(null);
+    setSubAgentActivity({});
     setPendingConfirm(null);
     setPendingElicitation(null);
     try {
@@ -446,14 +598,23 @@ export default function App() {
               url: e.url,
             });
           }
-          if (run.status === "running" || run.status === "awaiting_user") {
+          if (run.status === "awaiting_user") {
+            setLoading(false);
+            setAgentActivity("等待你的确认…");
+          } else if (run.status === "running") {
             setLoading(true);
-            await streamRun(sid, active.run_id, handleSse);
+            setAgentActivity("思考中…");
+            if (active.source !== "db") {
+              try {
+                await streamRun(sid, active.run_id, handleSse);
+              } catch {
+                setLoading(false);
+                setAgentActivity(null);
+              }
+            }
           }
         } catch {
           // 活跃 Run 可能已结束，忽略重连失败
-        } finally {
-          setLoading(false);
         }
       }
       const arts = await listArtifacts(sid);
@@ -465,11 +626,17 @@ export default function App() {
   }
 
   const currentSession = sessions.find((s) => s.session_id === sessionId);
+  const worktreePathForUi =
+    gitWorktreePath ?? currentSession?.git_worktree_path ?? null;
+  const worktreeBranchForUi =
+    gitWorktreeBranch ?? currentSession?.git_worktree_branch ?? null;
   const worktreeStatus = deriveWorktreeStatus(
     gitWorktreeEnabled,
     sessionId ? currentSession?.project_root ?? projectRootDraft : projectRootDraft,
-    gitWorktreePath,
-    currentSession?.git_worktree_status,
+    worktreePathForUi,
+    sessionId
+      ? currentSession?.git_worktree_status
+      : draftWorktreeStatus ?? undefined,
   );
 
   async function renameSession(sid: string, title: string) {
@@ -509,9 +676,13 @@ export default function App() {
     setArtifacts([]);
     setPlan("");
     setTodos([]);
+    setSubAgentActivity({});
     setProjectRootDraft("");
     setGitWorktreePath(null);
     setGitWorktreeBranch(null);
+    setDraftWorktreeStatus(null);
+    setGitWorktreeEnabled(getLastGitWorktreeEnabled());
+    setGitBranchPrefix(getLastGitBranchPrefix());
     setPermissionMode(getLastPermissionMode());
   }
 
@@ -525,9 +696,9 @@ export default function App() {
         git_branch_prefix: prefix.trim() || DEFAULT_GIT_BRANCH_PREFIX,
       });
       const rows = await listSessions();
-      setSessions(rows);
+      syncSessionsAndWorktreeState(rows);
       const updated = rows.find((s) => s.session_id === sessionId);
-      if (updated) applyWorktreeRuntimeFromSession(updated);
+      if (updated) applyGitWorktreeSettingsFromSession(updated);
     } catch (e) {
       pushMessage({ role: "assistant", content: friendlyWorktreeError(String(e)) });
     }
@@ -573,10 +744,7 @@ export default function App() {
       setProjectRootDraft(result.path);
       if (sessionId) {
         await updateSession(sessionId, { project_root: result.path });
-        const rows = await listSessions();
-        setSessions(rows);
-        const updated = rows.find((s) => s.session_id === sessionId);
-        if (updated) applyWorktreeRuntimeFromSession(updated);
+        syncSessionsAndWorktreeState(await listSessions());
       }
     } catch (e) {
       pushMessage({ role: "assistant", content: String(e) });
@@ -611,6 +779,11 @@ export default function App() {
     setLoading(true);
     setAgentActivity("思考中…");
     try {
+      const prefix = (gitBranchPrefix || DEFAULT_GIT_BRANCH_PREFIX).trim();
+      setLastGitBranchPrefix(prefix);
+      if (sessionId) {
+        await updateSession(sessionId, { git_branch_prefix: prefix }).catch(() => undefined);
+      }
       const sid = await ensureSession();
       const isFirstMessage = useChatStore.getState().messages.length === 0;
       pushMessage({ role: "user", content: input });
@@ -626,13 +799,30 @@ export default function App() {
       const ac = new AbortController();
       chatAbortRef.current = ac;
       await streamChat(sid, text, handleSse, selectedModelId || undefined, ac.signal);
+      chatAbortRef.current = null;
       await refreshTasks(sid);
       setArtifacts(await listArtifacts(sid));
-      listSessions().then(setSessions).catch(() => undefined);
+      listSessions()
+        .then(syncSessionsAndWorktreeState)
+        .catch(() => undefined);
     } catch (e) {
-      flushAssistantStream();
-      pushMessage({ role: "assistant", content: String(e) });
+      if (!isStreamAbortError(e)) {
+        flushAssistantStream();
+        pushMessage({ role: "assistant", content: friendlyWorktreeError(String(e)) });
+      }
     } finally {
+      const sid = sessionIdRef.current;
+      if (sid && activeRunIdRef.current) {
+        try {
+          const active = await fetchActiveRun(sid);
+          if (!active.run_id) {
+            await finalizeRunState(sid, true);
+            return;
+          }
+        } catch {
+          // fall through to default cleanup
+        }
+      }
       flushAssistantStream();
       setLoading(false);
       setAgentActivity(null);
@@ -643,7 +833,19 @@ export default function App() {
     const active = await fetchActiveRun(sid);
     if (!active.run_id) return;
     setActiveRunId(active.run_id);
+    if (active.source === "db") return;
     await streamRun(sid, active.run_id, handleSse);
+  }
+
+  async function retryWorktreeProvision() {
+    try {
+      const sid = sessionId ?? (await ensureSession());
+      const updated = await provisionSessionWorktree(sid);
+      applyWorktreeRuntimeFromSession(updated);
+      setSessions(await listSessions());
+    } catch (e) {
+      pushMessage({ role: "assistant", content: friendlyWorktreeError(String(e)) });
+    }
   }
 
   async function respondElicit(action: "accept" | "decline" | "cancel") {
@@ -675,6 +877,7 @@ export default function App() {
     try {
       await interruptChat(sessionId);
       setActiveRunId(null);
+      setSubAgentActivity({});
       setPendingConfirm(null);
       setPendingElicitation(null);
     } catch (e) {
@@ -785,13 +988,14 @@ export default function App() {
           <GitWorktreeToolbarControl
             enabled={gitWorktreeEnabled}
             branchPrefix={gitBranchPrefix}
-            worktreePath={gitWorktreePath}
-            worktreeBranch={gitWorktreeBranch}
+            worktreePath={worktreePathForUi}
+            worktreeBranch={worktreeBranchForUi}
             worktreeStatus={worktreeStatus}
             disabled={loading}
             onEnabledChange={changeGitWorktreeEnabled}
             onBranchPrefixChange={changeGitBranchPrefix}
             onBranchPrefixCommit={commitGitBranchPrefix}
+            onProvision={retryWorktreeProvision}
           />
         </div>
       </nav>
@@ -873,7 +1077,9 @@ export default function App() {
                         try {
                           await streamRun(sessionId, activeRunId, handleSse);
                         } catch (e) {
-                          pushMessage({ role: "assistant", content: String(e) });
+                          if (!isStreamAbortError(e)) {
+                            pushMessage({ role: "assistant", content: String(e) });
+                          }
                         } finally {
                           setLoading(false);
                         }
@@ -990,6 +1196,7 @@ export default function App() {
                 artifacts={artifacts}
                 sessionId={sessionId}
                 busy={loading || !!activeRunId}
+                subAgentActivity={subAgentActivity}
               />
             </div>
           </div>

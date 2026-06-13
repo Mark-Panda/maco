@@ -3,6 +3,26 @@
 use maco_core::{MacoError, MacoResult};
 use sqlx::SqlitePool;
 
+/// worktree 模式下是否拦截 bash / MCP 工具访问主仓库路径。
+pub const WORKTREE_PATH_GUARD_KEY: &str = "worktree_path_guard_enabled";
+
+/// 解析设置值；缺省为启用。
+pub fn parse_worktree_path_guard(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => {
+            let v = v.trim().to_lowercase();
+            v != "false" && v != "0" && v != "off"
+        }
+        None => true,
+    }
+}
+
+pub async fn worktree_path_guard_enabled(repo: &SettingsRepo) -> MacoResult<bool> {
+    Ok(parse_worktree_path_guard(
+        repo.get(WORKTREE_PATH_GUARD_KEY).await?.as_deref(),
+    ))
+}
+
 #[derive(Clone)]
 pub struct SettingsRepo {
     pool: SqlitePool,
@@ -49,6 +69,9 @@ pub async fn seed_defaults(repo: &SettingsRepo) -> MacoResult<()> {
 }"#;
     if repo.get("memory").await?.is_none() {
         repo.set("memory", memory).await?;
+    }
+    if repo.get(WORKTREE_PATH_GUARD_KEY).await?.is_none() {
+        repo.set(WORKTREE_PATH_GUARD_KEY, "true").await?;
     }
     Ok(())
 }

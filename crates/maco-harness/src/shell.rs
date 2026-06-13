@@ -14,13 +14,19 @@ use serde_json::{json, Value};
 pub struct MacoBashTool {
     scratch_dir: PathBuf,
     workspace: Option<SessionWorkspace>,
+    worktree_path_guard: bool,
 }
 
 impl MacoBashTool {
-    pub fn new(scratch_dir: PathBuf, workspace: Option<SessionWorkspace>) -> Self {
+    pub fn new(
+        scratch_dir: PathBuf,
+        workspace: Option<SessionWorkspace>,
+        worktree_path_guard: bool,
+    ) -> Self {
         Self {
             scratch_dir,
             workspace,
+            worktree_path_guard,
         }
     }
 }
@@ -54,14 +60,16 @@ impl Tool for MacoBashTool {
     async fn execute(&self, _ctx: Arc<dyn ToolContext>, args: Value) -> Result<Value> {
         let args: BashArgs = serde_json::from_value(args)
             .map_err(|e| AdkError::tool(format!("invalid bash arguments: {e}")))?;
-        if let Some(ref ws) = self.workspace {
-            if ws.uses_worktree {
-                if let Some(reason) =
-                    bash_command_targets_main_repo(&args.command, &ws.repo_root, &ws.workspace_root)
-                {
-                    return Err(AdkError::tool(format!(
-                        "command blocked ({reason}); edit files in the worktree workspace only"
-                    )));
+        if self.worktree_path_guard {
+            if let Some(ref ws) = self.workspace {
+                if ws.uses_worktree {
+                    if let Some(reason) =
+                        bash_command_targets_main_repo(&args.command, &ws.repo_root, &ws.workspace_root)
+                    {
+                        return Err(AdkError::tool(format!(
+                            "command blocked ({reason}); edit files in the worktree workspace only"
+                        )));
+                    }
                 }
             }
         }

@@ -96,7 +96,7 @@ impl HitlGate {
             policy_tool,
         ) {
             PolicyAction::Allow => Ok(None),
-            PolicyAction::Deny => Ok(Some(denied_content(
+            PolicyAction::Deny => Ok(Some(tool_denied_content(
                 tool_name,
                 call_id,
                 "tool denied by policy",
@@ -157,7 +157,7 @@ impl HitlGate {
                 if approved {
                     Ok(None)
                 } else {
-                    Ok(Some(denied_content(
+                    Ok(Some(tool_denied_content(
                         tool_name,
                         call_id,
                         "User rejected tool execution",
@@ -168,8 +168,8 @@ impl HitlGate {
     }
 }
 
-/// 构造工具被拒绝时的 FunctionResponse 内容。
-fn denied_content(tool_name: &str, call_id: &str, message: &str) -> Content {
+/// 构造工具被拒绝时的 FunctionResponse 内容（HITL / 路径守卫等）。
+pub fn tool_denied_content(tool_name: &str, call_id: &str, message: &str) -> Content {
     Content {
         role: "user".into(),
         parts: vec![Part::FunctionResponse {

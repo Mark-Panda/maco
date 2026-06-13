@@ -37,6 +37,7 @@ type Props = {
   onEnabledChange: (enabled: boolean) => void;
   onBranchPrefixChange: (prefix: string) => void;
   onBranchPrefixCommit: () => void;
+  onProvision?: () => void;
 };
 
 export function GitWorktreeToolbarControl({
@@ -49,6 +50,7 @@ export function GitWorktreeToolbarControl({
   onEnabledChange,
   onBranchPrefixChange,
   onBranchPrefixCommit,
+  onProvision,
 }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -109,6 +111,15 @@ export function GitWorktreeToolbarControl({
               role="status"
             >
               {hint.text}
+              {worktreeStatus === "pending" && onProvision && (
+                <button
+                  type="button"
+                  className="git-worktree-toolbar-retry"
+                  onClick={() => onProvision()}
+                >
+                  立即创建 worktree
+                </button>
+              )}
             </p>
           )}
           <label className="git-worktree-toolbar-toggle">

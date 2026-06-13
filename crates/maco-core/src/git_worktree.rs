@@ -108,6 +108,37 @@ pub fn bash_command_targets_main_repo(
         }
     }
 
+    if git_c_targets_main_repo(command, &repo_canon, &ws_canon, workspace_root).is_some() {
+        return Some("git -C targets the main repository outside the worktree");
+    }
+
+    None
+}
+
+fn git_c_targets_main_repo(
+    command: &str,
+    repo_canon: &Path,
+    ws_canon: &Path,
+    workspace_root: &Path,
+) -> Option<()> {
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let mut i = 0;
+    while i < parts.len() {
+        let flag = parts[i].trim_matches(|c: char| "\"'`".contains(c));
+        if flag == "-C" || flag == "--git-dir" {
+            if let Some(path_token) = parts.get(i + 1) {
+                let cleaned = path_token.trim_matches(|c: char| "\"'`".contains(c));
+                if token_targets_forbidden_repo(cleaned, repo_canon, ws_canon, workspace_root)
+                    .is_some()
+                {
+                    return Some(());
+                }
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
     None
 }
 
@@ -369,6 +400,131 @@ pub fn remove_worktree(repo_root: &Path, session_id: &str) -> MacoResult<()> {
     Ok(())
 }
 
+use serde_json::Value;
+
+/// worktree 模式下检测路径是否指向主仓库（worktree 外）。
+pub fn path_targets_forbidden_repo_root(
+    path: &str,
+    repo_root: &Path,
+    workspace_root: &Path,
+) -> bool {
+    let repo_canon = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let ws_canon = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    token_targets_forbidden_repo(path, &repo_canon, &ws_canon, workspace_root).is_some()
+}
+
+fn is_filesystem_like_tool(tool_name: &str) -> bool {
+    let lower = tool_name.to_lowercase();
+    if lower.starts_with("filesystem") || lower.contains("filesystem__") {
+        return true;
+    }
+    matches!(
+        lower.as_str(),
+        "read_file"
+            | "write_file"
+            | "read_text_file"
+            | "edit_file"
+            | "list_directory"
+            | "create_directory"
+            | "move_file"
+            | "search_files"
+            | "get_file_info"
+            | "list_allowed_directories"
+    ) || lower.ends_with("__read_file")
+        || lower.ends_with("__write_file")
+        || lower.ends_with("__read_text_file")
+        || lower.ends_with("__edit_file")
+        || lower.ends_with("__list_directory")
+}
+
+fn extract_path_fields(value: &Value) -> Vec<String> {
+    const KEYS: &[&str] = &[
+        "path",
+        "file_path",
+        "filepath",
+        "file",
+        "filename",
+        "source",
+        "destination",
+        "target",
+        "directory",
+        "dir",
+        "folder",
+    ];
+    let mut out = Vec::new();
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map {
+                if KEYS.contains(&k.as_str()) {
+                    if let Some(s) = v.as_str() {
+                        out.push(s.to_string());
+                    }
+                } else {
+                    out.extend(extract_path_fields(v));
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                out.extend(extract_path_fields(item));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// worktree 模式下拦截 filesystem MCP 工具对主仓库的路径访问。
+pub fn filesystem_tool_access_denied(
+    uses_worktree: bool,
+    repo_root: &Path,
+    workspace_root: &Path,
+    tool_name: &str,
+    args: &Value,
+) -> Option<&'static str> {
+    if !uses_worktree || !is_filesystem_like_tool(tool_name) {
+        return None;
+    }
+    for path in extract_path_fields(args) {
+        if path_targets_forbidden_repo_root(&path, repo_root, workspace_root) {
+            return Some("filesystem tool path targets main repository outside worktree");
+        }
+    }
+    None
+}
+
+/// worktree 模式下拦截 MCP 工具（含自定义 MCP）参数中的主仓库路径。
+pub fn worktree_mcp_path_access_denied(
+    uses_worktree: bool,
+    repo_root: &Path,
+    workspace_root: &Path,
+    tool_name: &str,
+    args: &Value,
+) -> Option<&'static str> {
+    if let Some(reason) = filesystem_tool_access_denied(
+        uses_worktree,
+        repo_root,
+        workspace_root,
+        tool_name,
+        args,
+    ) {
+        return Some(reason);
+    }
+    if !uses_worktree || !tool_name.contains("__") {
+        return None;
+    }
+    for path in extract_path_fields(args) {
+        if path_targets_forbidden_repo_root(&path, repo_root, workspace_root) {
+            return Some("MCP tool path targets main repository outside worktree");
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,10 +554,66 @@ mod tests {
     }
 
     #[test]
+    fn bash_guard_blocks_git_c_main_repo() {
+        let repo = std::env::temp_dir().join("maco-guard-repo");
+        let wt = std::env::temp_dir().join("maco-guard-wt");
+        let cmd = format!("git -C {} status", repo.display());
+        assert!(bash_command_targets_main_repo(&cmd, &repo, &wt).is_some());
+    }
+
+    #[test]
     fn bash_guard_blocks_absolute_repo_path() {
         let repo = std::env::temp_dir().join("maco-guard-repo");
         let wt = std::env::temp_dir().join("maco-guard-wt");
         let cmd = format!("cat {}/README.md", repo.display());
         assert!(bash_command_targets_main_repo(&cmd, &repo, &wt).is_some());
+    }
+
+    #[test]
+    fn filesystem_guard_blocks_repo_path_in_args() {
+        let repo = std::env::temp_dir().join(format!(
+            "maco-fs-guard-repo-{}",
+            std::process::id()
+        ));
+        let wt = repo.join("worktree");
+        std::fs::create_dir_all(&wt).expect("create worktree dir");
+        let args = serde_json::json!({ "path": repo.to_string_lossy() });
+        let denied = filesystem_tool_access_denied(true, &repo, &wt, "read_file", &args);
+        assert_eq!(
+            denied,
+            Some("filesystem tool path targets main repository outside worktree")
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn filesystem_guard_ignores_non_worktree_mode() {
+        let repo = std::env::temp_dir().join("maco-fs-guard-repo");
+        let wt = std::env::temp_dir().join("maco-fs-guard-wt");
+        let args = serde_json::json!({ "path": "/etc/passwd" });
+        assert!(filesystem_tool_access_denied(false, &repo, &wt, "read_file", &args).is_none());
+    }
+
+    #[test]
+    fn custom_mcp_guard_blocks_repo_path() {
+        let repo = std::env::temp_dir().join(format!(
+            "maco-mcp-guard-repo-{}",
+            std::process::id()
+        ));
+        let wt = repo.join("worktree");
+        std::fs::create_dir_all(&wt).expect("create worktree dir");
+        let args = serde_json::json!({ "file": repo.to_string_lossy() });
+        let denied = worktree_mcp_path_access_denied(
+            true,
+            &repo,
+            &wt,
+            "custom_fs__read_document",
+            &args,
+        );
+        assert_eq!(
+            denied,
+            Some("MCP tool path targets main repository outside worktree")
+        );
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }

@@ -1,7 +1,12 @@
 //! `maco_session_meta` 表：会话标题、模型绑定与生命周期状态。
 
 use chrono::Utc;
-use maco_core::{AgentPermissionMode, DEFAULT_GIT_BRANCH_PREFIX, MacoError, MacoResult};
+use std::path::Path;
+
+use maco_core::{
+    probe_git_repository, resolve_project_root, AgentPermissionMode, DEFAULT_GIT_BRANCH_PREFIX,
+    GitRepoProbe, MacoError, MacoResult,
+};
 use sqlx::SqlitePool;
 
 const SESSION_META_SELECT: &str = "SELECT session_id, title, model_id, project_id, project_root, \
@@ -151,29 +156,65 @@ impl SessionMetaRepo {
         Ok(())
     }
 
-    /// Agent 实际工作目录：启用 worktree 时仅暴露 worktree 路径，避免 MCP 访问主仓库。
+    /// 单会话 Agent 工作目录（供 filesystem MCP 根目录计算）。
+    pub fn agent_workspace_root_from_record(rec: &SessionMetaRecord) -> Option<String> {
+        if let Some(path) = rec
+            .git_worktree_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter(|p| Path::new(p).exists())
+        {
+            return Some(path.to_string());
+        }
+
+        let project = rec
+            .project_root
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        if rec.git_worktree_enabled != 0 {
+            if project.is_none() {
+                return None;
+            }
+            // Git 仓库且 worktree 待 provision：不把主仓库加入 MCP，Run 内会先 provision。
+            if let Ok(Some(repo)) = resolve_project_root(rec.project_root.as_deref()) {
+                if probe_git_repository(&repo) == GitRepoProbe::Available {
+                    return None;
+                }
+            }
+            return project
+                .filter(|p| Path::new(p).exists())
+                .map(str::to_string);
+        }
+
+        project
+            .filter(|p| Path::new(p).exists())
+            .map(str::to_string)
+    }
+
+    /// 查询指定会话的 Agent 工作目录（未 provision worktree 时返回 `None`）。
+    pub async fn agent_workspace_root_for_session(
+        &self,
+        session_id: &str,
+    ) -> MacoResult<Option<String>> {
+        let rec = self.get(session_id).await?;
+        Ok(rec.as_ref().and_then(Self::agent_workspace_root_from_record))
+    }
+
+    /// 各活跃会话 Agent 工作目录并集（每会话按 worktree 策略单独计算，避免主仓库与 worktree 混用）。
     pub async fn list_distinct_workspace_roots(&self) -> MacoResult<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT DISTINCT root FROM (
-                SELECT NULLIF(TRIM(git_worktree_path), '') AS root
-                FROM maco_session_meta
-                WHERE git_worktree_enabled = 1
-                  AND git_worktree_path IS NOT NULL
-                  AND TRIM(git_worktree_path) != ''
-                  AND status NOT IN ('deleted', 'pending_delete')
-                UNION
-                SELECT NULLIF(TRIM(project_root), '') AS root
-                FROM maco_session_meta
-                WHERE git_worktree_enabled = 0
-                  AND project_root IS NOT NULL
-                  AND TRIM(project_root) != ''
-                  AND status NOT IN ('deleted', 'pending_delete')
-             ) WHERE root IS NOT NULL",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| MacoError::database(e.to_string()))?;
-        Ok(rows.into_iter().map(|r| r.0).collect())
+        let mut seen = std::collections::HashSet::new();
+        let mut roots = Vec::new();
+        for rec in self.list_active().await? {
+            if let Some(root) = Self::agent_workspace_root_from_record(&rec) {
+                if seen.insert(root.clone()) {
+                    roots.push(root);
+                }
+            }
+        }
+        Ok(roots)
     }
 
     /// 创建失败回滚时硬删除元数据行。
@@ -333,5 +374,49 @@ impl SessionMetaRepo {
             created_at: now.clone(),
             updated_at: now,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_rec() -> SessionMetaRecord {
+        SessionMetaRepo::new_record(
+            "sid".into(),
+            None,
+            None,
+            Some("/tmp/proj".into()),
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn agent_workspace_root_prefers_worktree_path() {
+        let wt = std::env::temp_dir().join("maco-agent-wt-test");
+        std::fs::create_dir_all(&wt).expect("create temp worktree dir");
+        let mut rec = base_rec();
+        rec.git_worktree_path = Some(wt.to_string_lossy().into_owned());
+        assert_eq!(
+            SessionMetaRepo::agent_workspace_root_from_record(&rec),
+            Some(wt.to_string_lossy().into_owned())
+        );
+        let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn agent_workspace_root_disabled_uses_project() {
+        let dir = std::env::temp_dir().join("maco-agent-project-test");
+        std::fs::create_dir_all(&dir).expect("create project dir");
+        let mut rec = base_rec();
+        rec.project_root = Some(dir.to_string_lossy().into_owned());
+        rec.git_worktree_enabled = 0;
+        assert_eq!(
+            SessionMetaRepo::agent_workspace_root_from_record(&rec),
+            Some(dir.to_string_lossy().into_owned())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

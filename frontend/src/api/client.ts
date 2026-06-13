@@ -124,7 +124,32 @@ export function friendlyWorktreeError(raw: string): string {
   if (msg.includes("git worktree") || msg.includes("git rev-parse")) {
     return `Git worktree 操作失败：${raw}`;
   }
+  if (
+    msg.includes("filesystem mcp scope") ||
+    msg.includes("timed out waiting for filesystem")
+  ) {
+    return "另一个会话的 Agent 正在运行，请稍候再试或先结束该会话的运行。";
+  }
+  if (
+    msg.includes("main repository outside worktree") ||
+    msg.includes("outside worktree")
+  ) {
+    return "该工具路径指向主仓库，worktree 模式下只能在 worktree 目录内操作。";
+  }
+  if (msg.includes("session already has an active run")) {
+    return "当前会话已有进行中的任务，请等待完成或先中断后再发消息。";
+  }
+  if (msg.includes("cannot reload mcp while an agent run is active")) {
+    return "有 Agent 正在运行，请等待完成或中断后再重载 MCP 连接池。";
+  }
   return raw;
+}
+
+/** fetch/SSE 被 AbortController 或用户「停止」中断时的可忽略错误。 */
+export function isStreamAbortError(e: unknown): boolean {
+  if (e instanceof DOMException && e.name === "AbortError") return true;
+  const msg = String(e);
+  return msg.includes("AbortError") || msg.includes("BodyStreamBuffer was aborted");
 }
 
 export function getLastPermissionMode(): AgentPermissionMode {
@@ -284,23 +309,29 @@ export async function createSession(
 async function consumeSse(
   res: Response,
   onEvent: (data: Record<string, unknown>) => void,
+  signal?: AbortSignal,
 ) {
   if (!res.ok || !res.body) throw new Error(await res.text());
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-    for (const part of parts) {
-      const line = part.trim();
-      if (!line.startsWith("data:")) continue;
-      const json = line.slice(5).trim();
-      if (json) onEvent(JSON.parse(json));
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith("data:")) continue;
+        const json = line.slice(5).trim();
+        if (json) onEvent(JSON.parse(json));
+      }
     }
+  } catch (e) {
+    if (signal?.aborted || isStreamAbortError(e)) return;
+    throw e;
   }
 }
 
@@ -321,7 +352,7 @@ export async function streamChat(
     }),
     signal,
   });
-  await consumeSse(res, onEvent);
+  await consumeSse(res, onEvent, signal);
 }
 
 export async function resumeRun(
@@ -599,7 +630,12 @@ export async function fetchActiveRun(sessionId: string) {
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error(await res.text());
-  return res.json() as Promise<{ session_id: string; run_id: string | null }>;
+  return res.json() as Promise<{
+    session_id: string;
+    run_id: string | null;
+    status?: string;
+    source?: "stream" | "db";
+  }>;
 }
 
 export async function streamRun(
@@ -709,6 +745,43 @@ export async function updateSession(
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await res.text());
+}
+
+/** 探测项目路径的 Git worktree 状态（新对话尚未创建会话时使用）。 */
+export async function probeGitWorktreeStatus(
+  projectRoot: string,
+  enabled = true,
+): Promise<GitWorktreeStatus> {
+  const params = new URLSearchParams({
+    project_root: projectRoot.trim(),
+    enabled: enabled ? "1" : "0",
+  });
+  const res = await fetch(`${API}/worktree/status?${params}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = (await res.json()) as { status: string };
+  const status = data.status;
+  if (
+    status === "disabled" ||
+    status === "no_project" ||
+    status === "not_git_repo" ||
+    status === "git_unavailable" ||
+    status === "pending" ||
+    status === "active"
+  ) {
+    return status;
+  }
+  return "pending";
+}
+
+export async function provisionSessionWorktree(sessionId: string) {
+  const res = await fetch(`${API}/sessions/${sessionId}/worktree/provision`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<SessionMeta>;
 }
 
 export type SkillSummary = {
@@ -876,6 +949,24 @@ export async function listToolPolicies() {
   const res = await fetch(`${API}/tool-policies`, { headers: authHeaders() });
   if (!res.ok) throw new Error(await res.text());
   return res.json() as Promise<ToolPolicyRecord[]>;
+}
+
+export async function fetchWorktreePathGuard() {
+  const res = await fetch(`${API}/tool-policies/worktree-guard`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<{ enabled: boolean }>;
+}
+
+export async function updateWorktreePathGuard(enabled: boolean) {
+  const res = await fetch(`${API}/tool-policies/worktree-guard`, {
+    method: "PATCH",
+    headers: authHeaders(),
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<{ enabled: boolean }>;
 }
 
 export async function createToolPolicy(body: {

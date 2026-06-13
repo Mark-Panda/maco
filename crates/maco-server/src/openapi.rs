@@ -13,6 +13,8 @@ pub struct HealthResponse {
     pub mcp: Vec<String>,
     /// 服务绑定地址。
     pub bind: String,
+    /// Agent scratch 临时目录根路径。
+    pub tmp_dir: String,
 }
 
 /// 会话元数据（列表/详情）。
@@ -131,6 +133,28 @@ pub struct GuardrailStatusDoc {
     pub pii_enabled: bool,
     /// 日志脱敏级别（如 `basic`）。
     pub log_redact: String,
+    /// worktree 模式下是否拦截 bash / MCP 访问主仓库路径。
+    pub worktree_path_guard: bool,
+}
+
+/// worktree 路径守卫开关。
+#[derive(utoipa::ToSchema, serde::Serialize, serde::Deserialize)]
+pub struct WorktreePathGuardDoc {
+    /// 是否启用路径强制。
+    pub enabled: bool,
+}
+
+/// 活跃 Run 查询结果（内存流优先，否则 DB 回退）。
+#[derive(utoipa::ToSchema, serde::Serialize)]
+pub struct ActiveRunDoc {
+    /// 会话 ID。
+    pub session_id: String,
+    /// 活跃 Run ID；无活跃 Run 时为 null。
+    pub run_id: Option<String>,
+    /// Run 状态（仅 `source=db` 时可能存在）。
+    pub status: Option<String>,
+    /// 数据来源：`stream`（内存）或 `db`。
+    pub source: Option<String>,
 }
 
 /// Run 状态响应摘要。
@@ -166,12 +190,12 @@ pub struct ElicitationRespondDoc {
     pub content: Option<serde_json::Value>,
 }
 
-/// MCP 服务配置。
+/// MCP 服务配置。内置 `filesystem` 由 maco 按会话启动子进程，不在全局池中重载。
 #[derive(utoipa::ToSchema, serde::Serialize, serde::Deserialize)]
 pub struct McpServerDoc {
     /// 配置 ID。
     pub id: String,
-    /// 服务名。
+    /// 服务名（内置 `filesystem` 不可删除）。
     pub name: String,
     /// `stdio` 或 `sse`。
     pub transport: String,
@@ -299,9 +323,18 @@ fn update_mcp_doc() {}
     path = "/api/sessions/{id}/runs/active",
     tag = "runs",
     params(("id" = String, Path, description = "会话 ID")),
-    responses((status = 200, description = "当前活跃 Run ID"))
+    responses((status = 200, description = "当前活跃 Run（stream 优先，db 回退）", body = ActiveRunDoc))
 )]
 fn active_run_doc() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/sessions/{id}/worktree/provision",
+    tag = "sessions",
+    params(("id" = String, Path, description = "会话 ID")),
+    responses((status = 200, description = "手动 provision worktree 并返回会话元数据", body = SessionMetaDoc))
+)]
+fn provision_worktree_doc() {}
 
 #[utoipa::path(
     get,
@@ -410,7 +443,10 @@ fn list_mcp_doc() {}
     post,
     path = "/api/mcp/reload",
     tag = "mcp",
-    responses((status = 200, description = "重载 MCP 连接池"))
+    responses(
+        (status = 200, description = "重载全局 MCP 连接池（不含 per-run filesystem 子进程；活跃 Run 时拒绝）"),
+        (status = 409, description = "存在活跃 Run")
+    )
 )]
 fn reload_mcp_doc() {}
 
@@ -502,6 +538,23 @@ fn list_tool_policies_doc() {}
 
 #[utoipa::path(
     get,
+    path = "/api/tool-policies/worktree-guard",
+    tag = "governance",
+    responses((status = 200, description = "worktree 主仓库路径拦截开关", body = WorktreePathGuardDoc))
+)]
+fn get_worktree_path_guard_doc() {}
+
+#[utoipa::path(
+    patch,
+    path = "/api/tool-policies/worktree-guard",
+    tag = "governance",
+    request_body = WorktreePathGuardDoc,
+    responses((status = 200, description = "更新 worktree 路径守卫并热更新 Harness", body = WorktreePathGuardDoc))
+)]
+fn update_worktree_path_guard_doc() {}
+
+#[utoipa::path(
+    get,
     path = "/api/sessions/{id}/artifacts/{artifact_id}",
     tag = "sessions",
     params(
@@ -554,6 +607,7 @@ fn list_tokens_doc() {}
         export_session_doc,
         session_messages_doc,
         active_run_doc,
+        provision_worktree_doc,
         get_run_doc,
         stream_run_doc,
         resume_run_doc,
@@ -576,6 +630,8 @@ fn list_tokens_doc() {}
         list_artifacts_doc,
         download_artifact_doc,
         list_tool_policies_doc,
+        get_worktree_path_guard_doc,
+        update_worktree_path_guard_doc,
     ),
     components(schemas(
         HealthResponse,
@@ -586,6 +642,8 @@ fn list_tokens_doc() {}
         ModelUpsertDoc,
         MemorySearchQueryDoc,
         GuardrailStatusDoc,
+        WorktreePathGuardDoc,
+        ActiveRunDoc,
         PickDirectoryDoc,
         RunStatusDoc,
         ResumeRunDoc,

@@ -72,6 +72,27 @@ fn default_enabled() -> bool {
     true
 }
 
+/// MiniMax 走 Anthropic 兼容协议，不能使用官方 `api.anthropic.com`。
+fn validate_minimax_endpoint(provider: &str, model_id: &str, base_url: Option<&str>) -> MacoResult<()> {
+    if provider != "anthropic" {
+        return Ok(());
+    }
+    if !model_id.to_lowercase().contains("minimax") {
+        return Ok(());
+    }
+    let base = base_url
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("https://api.anthropic.com");
+    let base_lower = base.to_lowercase();
+    if base_lower.contains("api.anthropic.com") || !base_lower.contains("minimax") {
+        return Err(MacoError::config(
+            "MiniMax 模型需将 base_url 设为 https://api.minimax.io/anthropic \
+             （国内可用 https://api.minimaxi.com/anthropic），并使用 MiniMax API Key",
+        ));
+    }
+    Ok(())
+}
+
 impl ModelView {
     pub fn from_record(rec: &ModelRecord) -> Self {
         Self {
@@ -142,16 +163,27 @@ pub async fn upsert_from_body(
         merge_api_key(base_config, None)?
     };
 
+    let upstream_model_id = body.model_id.trim().to_string();
+    let base_url = match body.base_url {
+        Some(url) => {
+            let trimmed = url.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        None => existing.as_ref().and_then(|e| e.base_url.clone()),
+    };
+    validate_minimax_endpoint(&body.provider, &upstream_model_id, base_url.as_deref())?;
+
     let now = Utc::now().to_rfc3339();
     let rec = ModelRecord {
         id: model_id.clone(),
         name: body.name.trim().to_string(),
         provider: body.provider.clone(),
-        model_id: body.model_id.trim().to_string(),
-        base_url: body
-            .base_url
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
+        model_id: upstream_model_id,
+        base_url,
         api_key_env: body
             .api_key_env
             .unwrap_or_else(|| existing.as_ref().map(|e| e.api_key_env.clone()).unwrap_or_default())

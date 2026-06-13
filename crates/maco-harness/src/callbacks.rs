@@ -2,12 +2,22 @@
 
 use std::sync::Arc;
 
+use adk_agent::guardrails::{GuardrailSet, PiiRedactor};
 use adk_core::{
     AfterAgentCallback, AfterModelCallback, AfterToolCallback, BeforeAgentCallback,
     BeforeModelCallback, BeforeModelResult, BeforeToolCallback,
 };
-use maco_governance::prepare_log_payload;
+use maco_governance::{pii_guardrail_enabled, prepare_log_payload};
 use maco_telemetry::MacoCallbackLogger;
+
+/// 主/子 Agent 共用的 guardrail 集合。
+pub fn agent_guardrails() -> GuardrailSet {
+    let mut set = GuardrailSet::new();
+    if pii_guardrail_enabled() {
+        set = set.with(PiiRedactor::new());
+    }
+    set
+}
 
 /// `before_agent`：记录阶段开始，不写 payload。
 pub fn before_agent(logger: Arc<MacoCallbackLogger>) -> BeforeAgentCallback {
@@ -75,16 +85,21 @@ pub fn after_model(
     })
 }
 
-use crate::hitl::HitlGate;
+use maco_core::{worktree_mcp_path_access_denied, SessionWorkspace};
+
+use crate::hitl::{tool_denied_content, HitlGate};
 
 /// `before_tool`：写工具调用日志，并按策略触发 HITL 确认。
 pub fn before_tool_with_hitl(
     logger: Arc<MacoCallbackLogger>,
     hitl: Arc<HitlGate>,
+    workspace: Option<SessionWorkspace>,
+    worktree_path_guard: bool,
 ) -> BeforeToolCallback {
     Box::new(move |ctx| {
         let logger = Arc::clone(&logger);
         let hitl = Arc::clone(&hitl);
+        let workspace = workspace.clone();
         Box::pin(async move {
             let tool_name = ctx.tool_name().unwrap_or("unknown");
             let input = ctx
@@ -95,6 +110,21 @@ pub fn before_tool_with_hitl(
 
             let args = ctx.tool_input().cloned().unwrap_or(serde_json::json!({}));
             let call_id = ctx.invocation_id().to_string();
+
+            if worktree_path_guard {
+                if let Some(ws) = workspace.as_ref() {
+                    if let Some(reason) = worktree_mcp_path_access_denied(
+                        ws.uses_worktree,
+                        &ws.repo_root,
+                        &ws.workspace_root,
+                        tool_name,
+                        &args,
+                    ) {
+                        return Ok(Some(tool_denied_content(tool_name, &call_id, reason)));
+                    }
+                }
+            }
+
             let source = if tool_name.contains("__") {
                 "mcp"
             } else if ctx.tool_name().map(|n| n.starts_with("update_") || n == "upsert_todo").unwrap_or(false) {

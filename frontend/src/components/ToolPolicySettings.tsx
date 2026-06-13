@@ -4,10 +4,12 @@ import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import {
   createToolPolicy,
   deleteToolPolicy,
+  fetchWorktreePathGuard,
   listToolPolicies,
   reloadToolPolicies,
   type ToolPolicyRecord,
   updateToolPolicy,
+  updateWorktreePathGuard,
 } from "../api/client";
 
 type FormState = {
@@ -36,14 +38,31 @@ export function ToolPolicySettings() {
   const [form, setForm] = useState<FormState>(EMPTY);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [worktreePathGuard, setWorktreePathGuard] = useState(true);
+  const [guardSaving, setGuardSaving] = useState(false);
 
   async function refresh() {
     setPolicies(await listToolPolicies());
+    const guard = await fetchWorktreePathGuard();
+    setWorktreePathGuard(guard.enabled);
   }
 
   useEffect(() => {
     refresh().catch(() => setPolicies([]));
   }, []);
+
+  async function toggleWorktreePathGuard(enabled: boolean) {
+    setGuardSaving(true);
+    setError("");
+    try {
+      const res = await updateWorktreePathGuard(enabled);
+      setWorktreePathGuard(res.enabled);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setGuardSaving(false);
+    }
+  }
 
   function resetForm() {
     setEditing(null);
@@ -130,6 +149,33 @@ export function ToolPolicySettings() {
       <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginTop: 0 }}>
         工具名支持 <code>*</code> 通配；<code>confirm</code> 会暂停并等待你确认。
       </p>
+
+      <label
+        className="panel-card"
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 10,
+          marginBottom: 12,
+          padding: 12,
+          fontSize: "0.85rem",
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={worktreePathGuard}
+          disabled={guardSaving}
+          onChange={(e) => void toggleWorktreePathGuard(e.target.checked)}
+        />
+        <span>
+          <strong>Worktree 路径强制</strong>
+          <br />
+          <span style={{ color: "var(--text-muted)" }}>
+            启用时，worktree 模式下拦截 bash 与 MCP 工具访问主仓库路径（仅允许 worktree 目录）。
+            关闭后仅依赖 Agent 提示，不自动拦截。
+          </span>
+        </span>
+      </label>
 
       {policies.map((p) => (
         <div key={p.id} className="model-list-item">

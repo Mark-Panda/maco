@@ -87,6 +87,11 @@ impl RunStreamRegistry {
             .get(session_id)
             .map(|h| h.run_id.clone())
     }
+
+    /// 是否有任意会话正在执行 Run（用于 MCP 重载门禁）。
+    pub async fn has_active(&self) -> bool {
+        !self.inner.lock().await.is_empty()
+    }
 }
 
 #[cfg(test)]

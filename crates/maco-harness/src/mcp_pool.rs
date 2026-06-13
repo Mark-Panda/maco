@@ -10,7 +10,7 @@ use adk_core::Toolset;
 use adk_tool::mcp::McpServerConfig;
 use adk_tool::{ElicitationHandler, McpHttpClientBuilder, McpServerManager};
 use maco_core::{MacoError, MacoResult};
-use maco_db::{McpServerRecord, McpServerRepo};
+use maco_db::{FILESYSTEM_MCP_NAME, McpServerRecord, McpServerRepo};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -64,6 +64,9 @@ impl McpPool {
         let mut sse_records: Vec<McpServerRecord> = Vec::new();
 
         for rec in records {
+            if rec.name == FILESYSTEM_MCP_NAME {
+                continue;
+            }
             if rec.transport == "stdio" {
                 if let Some(cfg) = record_to_stdio_config(&rec, &self.tmp_dir)? {
                     stdio_configs.insert(rec.name.clone(), cfg);

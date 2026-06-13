@@ -38,8 +38,8 @@ impl RunOrchestrator {
     pub async fn start_run(&self, session_id: &str) -> MacoResult<RunRecord> {
         let lock = self.lock_for(session_id).await;
         let _guard = lock.lock().await;
-        if self.runs.has_running(session_id).await? {
-            return Err(MacoError::run("session already has a running run"));
+        if self.runs.has_active_run(session_id).await? {
+            return Err(MacoError::run("session already has an active run"));
         }
         let pending = self.runs.create(session_id, RUN_STATUS_PENDING).await?;
         self.runs

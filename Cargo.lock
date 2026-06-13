@@ -37,8 +37,6 @@ dependencies = [
 [[package]]
 name = "adk-anthropic"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "142b2e41f33e26bdce70291498237a9ab27f7b46938dcaf747f3846fba4117e8"
 dependencies = [
  "base64",
  "bytes",

@@ -9,6 +9,20 @@ import { useConfirmDialog } from "../hooks/useConfirmDialog";
 
 type Provider = ModelView["provider"];
 
+const MINIMAX_ANTHROPIC_BASE = "https://api.minimax.io/anthropic";
+
+function isMinimaxModelId(modelId: string) {
+  return modelId.toLowerCase().includes("minimax");
+}
+
+function suggestMinimaxBaseUrl(modelId: string, currentBaseUrl: string) {
+  if (!isMinimaxModelId(modelId)) return currentBaseUrl;
+  if (!currentBaseUrl || currentBaseUrl.includes("api.anthropic.com")) {
+    return MINIMAX_ANTHROPIC_BASE;
+  }
+  return currentBaseUrl;
+}
+
 const PROVIDER_DEFAULTS: Record<
   Provider,
   { model_id: string; base_url: string; api_key_env: string }
@@ -95,7 +109,10 @@ export function ModelSettings({ models, onChange }: Props) {
         name: form.name,
         provider: form.provider,
         model_id: form.model_id,
-        base_url: form.base_url || undefined,
+        base_url:
+          form.provider === "gemini"
+            ? undefined
+            : form.base_url.trim() || PROVIDER_DEFAULTS[form.provider].base_url,
         api_key: form.api_key || undefined,
         api_key_env: form.api_key_env || undefined,
         is_default: form.is_default,
@@ -212,7 +229,17 @@ export function ModelSettings({ models, onChange }: Props) {
             <label>Model ID</label>
             <input
               value={form.model_id}
-              onChange={(e) => setForm({ ...form, model_id: e.target.value })}
+              onChange={(e) => {
+                const model_id = e.target.value;
+                setForm({
+                  ...form,
+                  model_id,
+                  base_url: suggestMinimaxBaseUrl(model_id, form.base_url),
+                  api_key_env: isMinimaxModelId(model_id)
+                    ? "MINIMAX_API_KEY"
+                    : form.api_key_env,
+                });
+              }}
               placeholder="gpt-4o-mini"
             />
           </div>
@@ -222,8 +249,17 @@ export function ModelSettings({ models, onChange }: Props) {
               <input
                 value={form.base_url}
                 onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-                placeholder={PROVIDER_DEFAULTS[form.provider].base_url}
+                placeholder={
+                  isMinimaxModelId(form.model_id)
+                    ? MINIMAX_ANTHROPIC_BASE
+                    : PROVIDER_DEFAULTS[form.provider].base_url
+                }
               />
+              {isMinimaxModelId(form.model_id) && (
+                <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: "4px 0 0" }}>
+                  MiniMax 须使用 MiniMax 端点（国内 api.minimaxi.com/anthropic），勿填 api.anthropic.com。
+                </p>
+              )}
             </div>
           )}
           <div className="field">

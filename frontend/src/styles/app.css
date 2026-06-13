@@ -962,6 +962,83 @@ body.tasks-dock-resizing .tasks-dock-resizer {
   color: var(--status-success);
 }
 
+.todo-sub-agent-lane {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--border);
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+
+.todo-sub-agent-lane--active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+.todo-sub-agent-lane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.todo-sub-agent-lane-icon {
+  display: inline-flex;
+  color: var(--accent);
+}
+
+.todo-sub-agent-lane-worker {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.6875rem;
+}
+
+.todo-sub-agent-lane-elapsed {
+  margin-left: auto;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.todo-sub-agent-lane-meta {
+  margin: 6px 0 0;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+}
+
+.todo-sub-agent-lane-meta--muted {
+  font-style: italic;
+}
+
+.todo-sub-agent-lane-output {
+  margin-top: 8px;
+}
+
+.todo-sub-agent-lane-output summary {
+  cursor: pointer;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--accent);
+  user-select: none;
+}
+
+.todo-sub-agent-lane-snippet {
+  margin: 6px 0 0;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.todo-sub-agent-lane-snippet--muted {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 .tasks-dock .panel-count {
   margin-bottom: 0;
 }

@@ -10,6 +10,7 @@ pub mod run;
 pub mod session_meta;
 pub mod settings;
 pub mod skill;
+pub mod sub_agent_run;
 pub mod tool_policy;
 pub mod usage;
 
@@ -19,13 +20,18 @@ pub use callback_log::CallbackLogRepo;
 pub use elicitation::{payload_summary, ElicitationRecord, ElicitationRepo};
 pub use job::{JobRecord, JobRepo};
 pub use mcp_server::{
-    rebuild_filesystem_mcp_roots, seed_default_filesystem_mcp, McpServerRecord, McpServerRepo,
+    filesystem_mcp_args, seed_default_filesystem_mcp, FILESYSTEM_MCP_NAME, McpServerRecord,
+    McpServerRepo,
 };
 pub use model::{ModelRecord, ModelRepo};
 pub use react::{PlanRecord, ReactRepo, TodoRecord};
 pub use run::{RunRecord, RunRepo};
 pub use session_meta::{SessionMetaRecord, SessionMetaRepo};
-pub use settings::SettingsRepo;
+pub use settings::{
+    parse_worktree_path_guard, worktree_path_guard_enabled, SettingsRepo,
+    WORKTREE_PATH_GUARD_KEY,
+};
 pub use skill::{SkillRecord, SkillRepo};
+pub use sub_agent_run::{SubAgentRunRecord, SubAgentRunRepo};
 pub use tool_policy::{seed_tool_policies, ToolPolicyRecord, ToolPolicyRepo};
 pub use usage::{UsageRepo, UsageSummaryItem};

@@ -3,15 +3,15 @@
 use std::sync::Arc;
 
 use maco_db::{
-    init_pool, rebuild_filesystem_mcp_roots, seed_default_filesystem_mcp, seed_defaults,
-    seed_tool_policies, ApiTokenRepo, ArtifactRepo, CallbackLogRepo, ElicitationRepo, JobRepo,
-    McpServerRepo, ModelRepo, ReactRepo, RunRepo, SessionMetaRepo, SettingsRepo, SkillRepo,
-    ToolPolicyRepo, UsageRepo,
+    init_pool, seed_default_filesystem_mcp, seed_defaults, seed_tool_policies, worktree_path_guard_enabled,
+    ApiTokenRepo, ArtifactRepo, CallbackLogRepo, ElicitationRepo, JobRepo, McpServerRepo, ModelRepo,
+    ReactRepo, RunRepo, SessionMetaRepo, SettingsRepo, SkillRepo, SubAgentRunRepo, ToolPolicyRepo,
+    UsageRepo,
 };
 use maco_governance::auth_disabled;
 use maco_harness::{
-    DynamicElicitationHandler, ElicitationBroker, MacoHarness, McpPool, RunOrchestrator,
-    AdkSkillManager, RunStreamRegistry,
+    DynamicElicitationHandler, ElicitationBroker, FilesystemMcpCoordinator, MacoHarness, McpPool,
+    RunOrchestrator, AdkSkillManager, RunStreamRegistry,
 };
 use maco_storage::{AdkStorage, ArtifactStore};
 
@@ -45,6 +45,8 @@ pub struct AppState {
     pub mcp_servers: McpServerRepo,
     /// HITL 工具策略仓库。
     pub tool_policies: ToolPolicyRepo,
+    /// 全局应用设置。
+    pub settings: SettingsRepo,
     /// Skill 元数据与启用状态。
     pub skills: SkillRepo,
     /// ADK Skill 索引与启用状态。
@@ -57,18 +59,30 @@ pub struct AppState {
     pub harness: Arc<MacoHarness>,
     /// MCP 连接池。
     pub mcp_pool: Arc<McpPool>,
+    /// filesystem MCP 根目录与 Run 生命周期协调。
+    pub filesystem_mcp: Arc<FilesystemMcpCoordinator>,
     /// 附件存储。
     pub artifacts: Arc<ArtifactStore>,
+    /// 子 Agent spawn 审计。
+    pub sub_agent_runs: SubAgentRunRepo,
     /// Agent 临时目录根路径。
     pub tmp_dir: std::path::PathBuf,
 }
 
 impl AppState {
-    /// 将会话 `project_root` 与 `tmp_dir` 同步到 filesystem MCP 并热重载连接池。
-    pub async fn sync_filesystem_mcp(&self) -> maco_core::MacoResult<()> {
-        if rebuild_filesystem_mcp_roots(&self.mcp_servers, &self.meta, &self.tmp_dir).await? {
-            self.mcp_pool.reload().await?;
+    /// 工作区变更后丢弃会话级 filesystem MCP 缓存，下次 Run 按新根目录启动子进程。
+    pub async fn invalidate_session_filesystem_cache(&self, session_id: &str) {
+        self.filesystem_mcp.release_session(session_id).await;
+    }
+
+    /// Agent Run 期间禁止重载 MCP 连接池。
+    pub async fn reload_mcp_pool_guarded(&self) -> maco_core::MacoResult<()> {
+        if self.harness.run_streams().has_active().await {
+            return Err(maco_core::MacoError::conflict(
+                "cannot reload MCP while an agent run is active",
+            ));
         }
+        self.mcp_pool.reload().await?;
         Ok(())
     }
 
@@ -91,6 +105,11 @@ impl AppState {
         let meta = SessionMetaRepo::new(db.pool.clone());
         let models = ModelRepo::new(db.pool.clone());
         let runs = RunRepo::new(db.pool.clone());
+        let stale = runs.fail_stale_active_runs("server restarted").await?;
+        if stale > 0 {
+            tracing::info!("marked {stale} stale active run(s) as failed after restart");
+        }
+
         let react = ReactRepo::new(db.pool.clone());
         let api_tokens = ApiTokenRepo::new(db.pool.clone());
         let usage = UsageRepo::new(db.pool.clone());
@@ -113,13 +132,9 @@ impl AppState {
         let dynamic_elicitation = DynamicElicitationHandler::new(
             orchestrator.clone(),
             ElicitationRepo::new(db.pool.clone()),
-            elicitation_broker,
+            elicitation_broker.clone(),
             Some(run_streams.clone()),
         );
-        if let Err(e) = rebuild_filesystem_mcp_roots(&mcp_servers, &meta, &paths.tmp_dir).await {
-            tracing::warn!("rebuild filesystem mcp on startup: {e}");
-        }
-
         let mcp_pool = Arc::new(McpPool::new(
             McpServerRepo::new(db.pool.clone()),
             dynamic_elicitation,
@@ -129,8 +144,18 @@ impl AppState {
             tracing::warn!("mcp pool initial reload: {e}");
         }
 
+        let filesystem_mcp = Arc::new(FilesystemMcpCoordinator::new(
+            McpServerRepo::new(db.pool.clone()),
+            paths.tmp_dir.clone(),
+            mcp_pool.elicitation(),
+        ));
+
         let skills = SkillRepo::new(db.pool.clone());
         let adk_skills = Arc::new(AdkSkillManager::new());
+
+        let worktree_path_guard = worktree_path_guard_enabled(&settings).await?;
+
+        let sub_agent_runs = SubAgentRunRepo::new(db.pool.clone());
 
         let adk_for_state = adk.clone();
         let harness = Arc::new(MacoHarness::new(
@@ -141,13 +166,16 @@ impl AppState {
             UsageRepo::new(db.pool.clone()),
             ElicitationRepo::new(db.pool.clone()),
             policies,
+            worktree_path_guard,
             mcp_pool.clone(),
-            McpServerRepo::new(db.pool.clone()),
+            filesystem_mcp.clone(),
+            elicitation_broker.clone(),
             run_streams,
             paths.tmp_dir.clone(),
             SessionMetaRepo::new(db.pool.clone()),
             artifacts.clone(),
             adk_skills.clone(),
+            sub_agent_runs.clone(),
         ));
 
         if let Err(e) = skills_sync::sync_skills(&skills, adk_skills.as_ref(), None).await {
@@ -167,13 +195,16 @@ impl AppState {
             jobs,
             mcp_servers,
             tool_policies: tool_policies_repo,
+            settings,
             skills,
             adk_skills,
             adk: adk_for_state,
             facade,
             harness,
             mcp_pool,
+            filesystem_mcp,
             artifacts,
+            sub_agent_runs,
             tmp_dir: paths.tmp_dir.clone(),
         })
     }

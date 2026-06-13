@@ -144,10 +144,12 @@ impl McpServerRepo {
     }
 }
 
-const FILESYSTEM_MCP_NAME: &str = "filesystem";
+/// DB 中内置 filesystem MCP 服务名。
+pub const FILESYSTEM_MCP_NAME: &str = "filesystem";
 const FILESYSTEM_MCP_PACKAGE: &str = "@modelcontextprotocol/server-filesystem";
 
-fn filesystem_mcp_args(allowed_roots: &[String]) -> MacoResult<String> {
+/// 构造 filesystem MCP stdio 参数 JSON（`npx -y @modelcontextprotocol/server-filesystem <roots...>`）。
+pub fn filesystem_mcp_args(allowed_roots: &[String]) -> MacoResult<String> {
     let mut args = vec![
         "-y".to_string(),
         FILESYSTEM_MCP_PACKAGE.to_string(),
@@ -169,44 +171,5 @@ pub async fn seed_default_filesystem_mcp(
     repo.insert(FILESYSTEM_MCP_NAME, "stdio", Some("npx"), &args, None, "{}")
         .await?;
     Ok(())
-}
-
-/// 根据 `tmp_dir` + 各会话 `project_root` 重建 filesystem MCP 允许目录并去重。
-pub async fn rebuild_filesystem_mcp_roots(
-    mcp_repo: &McpServerRepo,
-    meta_repo: &crate::SessionMetaRepo,
-    tmp_dir: &std::path::Path,
-) -> MacoResult<bool> {
-    let mut roots: Vec<String> = vec![tmp_dir.to_string_lossy().into_owned()];
-    roots.extend(meta_repo.list_distinct_project_roots().await?);
-
-    let mut seen = std::collections::HashSet::new();
-    roots.retain(|r| seen.insert(r.clone()));
-
-    let args = filesystem_mcp_args(&roots)?;
-
-    if let Some(fs) = mcp_repo.get_by_name(FILESYSTEM_MCP_NAME).await? {
-        if fs.transport != "stdio" {
-            return Ok(false);
-        }
-        mcp_repo
-            .update(
-                &fs.id,
-                &fs.name,
-                &fs.transport,
-                fs.command.as_deref().or(Some("npx")),
-                &args,
-                fs.url.as_deref(),
-                &fs.env,
-                fs.enabled != 0,
-            )
-            .await?;
-        return Ok(true);
-    }
-
-    mcp_repo
-        .insert(FILESYSTEM_MCP_NAME, "stdio", Some("npx"), &args, None, "{}")
-        .await?;
-    Ok(true)
 }
 
